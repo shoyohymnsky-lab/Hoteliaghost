@@ -8,7 +8,7 @@
   "server": {
     "ip": "TheWorldStorm.aternos.me",
     "port": 35601,
-    "version": "1.15.1"
+    "version": "1.12.2"
   },
   "position": {
     "enabled": true,
