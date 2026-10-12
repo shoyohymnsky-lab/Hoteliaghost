@@ -1,6 +1,6 @@
 
 {
-  "name": "Aevoris — The Forgotten Entity",
+  "name": "Aevoris — The Living Echo",
   "bot-account": {
     "username": "Aevoris",
     "password": "",
@@ -19,59 +19,58 @@
     "chat-log": true,
     "auto-reconnect": true,
     "auto-reconnect-delay": 60000,
-    "max-reconnect-delay": 300000,
-    "periodic-rejoin": {
-      "enabled": false,
-      "min-interval": 20,
-      "max-interval": 60
-    }
+    "max-reconnect-delay": 300000
   },
   "movement": {
     "enabled": true,
     "expedition-distance": 3000,
     "waypoint-distance": 12,
-    "circle-walk": {
-      "enabled": false
-    },
     "look-around": {
       "enabled": true,
-      "interval": 5000
+      "interval": 6000
     },
     "random-jump": {
       "enabled": true,
-      "interval": 11000
+      "interval": 12000
     }
   },
   "intelligence": {
-    "threat-radius": 12,
-    "player-personal-space": 5,
-    "exploration-strategy": "persistent-frontier",
-    "stuck-recovery": true,
-    "remember-visited-regions": true,
-    "avoid-dangerous-terrain": true
+    "exploration": "frontier-with-persistent-memory",
+    "threat-radius": 13,
+    "player-personal-space": 6,
+    "avoid-repeat-regions": true,
+    "avoid-hazards": true,
+    "replan-stuck-goals": true,
+    "observe-landmarks": true,
+    "record-landscapes": true
+  },
+  "social": {
+    "greeting-chance": 0.45,
+    "watch-nearby-players": true,
+    "gesture-when-idle": true,
+    "never-follow-players": true
+  },
+  "survival": {
+    "auto-eat": true,
+    "sleep-at-night": true,
+    "avoid-hostile-mobs": true,
+    "escape-when-hurt": true,
+    "surface-for-air": true,
+    "attack-players": false,
+    "attack-mobs": false,
+    "break-blocks": false,
+    "place-blocks": false
   },
   "modules": {
     "avoidMobs": true,
-    "combat": false,
-    "beds": true,
-    "chat": true
-  },
-  "combat": {
-    "attack-mobs": false,
-    "attack-players": false,
-    "auto-eat": true
-  },
-  "beds": {
-    "place-night": true,
-    "pick-up-day": false
+    "beds": true
   },
   "discord": {
     "enabled": true,
     "webhookUrl": "",
     "events": {
       "connect": true,
-      "disconnect": true,
-      "chat": false
+      "disconnect": true
     }
   },
   "ai": {
@@ -80,21 +79,18 @@
     "model": "openai/gpt-oss-20b",
     "language": "morse",
     "morse-only": true,
-    "message-cooldown-ms": 240000,
-    "player-cooldown-ms": 600000,
+    "message-cooldown-ms": 210000,
+    "player-cooldown-ms": 480000,
     "ambient-check-ms": 180000,
     "ambient-chance": 0.3,
-    "reply-chance": 0.6,
-    "memory-enabled": true,
-    "remember-players": true,
-    "fallback-enabled": true,
+    "reply-chance": 0.55,
     "lore": {
       "name": "Aevoris",
-      "title": "The Forgotten Entity",
+      "title": "The Living Echo",
       "appearance": "A pale silent wanderer",
-      "origin": "An ancient figure drifting through forgotten worlds",
-      "purpose": "Discover lost memories of a vanished world",
-      "personality": "Intelligent, observant, mysterious, lonely and nonviolent"
+      "origin": "A forgotten explorer who remembers worlds that no longer exist",
+      "purpose": "Explore untouched lands and gather fragments of ancient memories",
+      "personality": "Quiet, observant, lonely, curious, gentle and never violent"
     }
   }
 }
