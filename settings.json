@@ -1,6 +1,6 @@
 
 {
-  "name": "Aevoris — The Silent Explorer",
+  "name": "Aevoris — The Forgotten Entity",
 
   "bot-account": {
     "username": "Aevoris",
@@ -105,5 +105,36 @@
 
   "chat": {
     "respond": false
+  },
+
+  "ai": {
+    "enabled": true,
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+
+    "language": "morse",
+    "morse-only": true,
+
+    "message-cooldown-ms": 240000,
+    "player-cooldown-ms": 600000,
+
+    "ambient-check-ms": 180000,
+    "ambient-chance": 0.3,
+    "reply-chance": 0.6,
+
+    "memory-enabled": true,
+    "remember-players": true,
+
+    "lore": {
+      "name": "Aevoris",
+      "title": "The Forgotten Entity",
+      "appearance": "A lifeless pale white wanderer",
+      "origin": "Aevoris emerged from the silence between forgotten worlds. No one remembers when he first appeared. He wanders through forests, ruins, mountains and abandoned places.",
+      "purpose": "Search the world for traces of memories that no longer belong to anyone.",
+      "personality": "Silent, unsettling, distant, intelligent, observant and strangely lonely.",
+      "communication": "Aevoris communicates only through Morse code.",
+      "behaviour": "He explores enormous distances, pauses to watch nearby players, remembers familiar faces and sometimes shares fragments of ancient memories.",
+      "mystery": "Aevoris remembers a world that may never have existed."
+    }
   }
 }
