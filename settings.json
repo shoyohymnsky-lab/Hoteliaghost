@@ -1,66 +1,80 @@
+
 {
-  "name": "AFK Bot",
+  "name": "Aevoris — The Silent Explorer",
+
   "bot-account": {
     "username": "Aevoris",
     "password": "",
     "type": "offline"
   },
+
   "server": {
     "ip": "TheWorldStorm.aternos.me",
     "port": 35601,
-    "version": "1.12.2"
+    "version": "1.15.1"
   },
+
   "position": {
-    "enabled": true,
+    "enabled": false,
     "x": 0,
     "y": 100,
     "z": 0
   },
+
   "utils": {
     "auto-auth": {
       "enabled": true,
-      "password": "Perzuu"
+      "password": ""
     },
+
     "anti-afk": {
       "enabled": true,
       "sneak": true
     },
+
     "chat-messages": {
-      "enabled": true,
-      "repeat": true,
-      "repeat-delay": 500,
-      "messages": [
-        "?????",
-        "?????",
-        "?????"
-      ]
+      "enabled": false,
+      "repeat": false,
+      "repeat-delay": 60000,
+      "messages": []
     },
+
     "chat-log": true,
+
     "auto-reconnect": true,
-    "auto-reconnect-delay": 2000,
-    "max-reconnect-delay": 20000,
+    "auto-reconnect-delay": 60000,
+    "max-reconnect-delay": 300000,
+
     "periodic-rejoin": {
       "enabled": false,
       "min-interval": 20,
       "max-interval": 60
     }
   },
+
   "movement": {
     "enabled": true,
+
+    "expedition-distance": 3000,
+    "waypoint-distance": 22,
+
     "circle-walk": {
-      "enabled": true,
+      "enabled": false,
       "radius": 4,
       "speed": 3000
     },
+
     "look-around": {
       "enabled": true,
       "interval": 5000
     },
+
     "random-jump": {
       "enabled": true,
       "interval": 10000
     }
   },
+
   "modules": {
     "avoidMobs": true,
     "combat": true,
@@ -68,24 +82,28 @@
     "chat": true,
     "console-commands": true
   },
+
   "combat": {
-    "attack-mobs": true,
+    "attack-mobs": false,
     "auto-eat": true
   },
+
   "beds": {
     "pick-up-day": true,
     "place-night": true
   },
+
   "discord": {
     "enabled": true,
-    "webhookUrl": "https://discord.com/api/webhooks/1472567640521183243/7DzSIaCSM_9-5DjzrlAuP9Tdj7Y3yAP6BHg3scKzhaRFdVk8ctWBlhOc7I8l5xC6Nqm3",
+    "webhookUrl": "",
     "events": {
       "connect": true,
       "disconnect": true,
       "chat": false
     }
   },
+
   "chat": {
-    "respond": true
+    "respond": false
   }
 }
