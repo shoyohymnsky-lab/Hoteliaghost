@@ -11,26 +11,10 @@
     "port": 35601,
     "version": "1.20.1"
   },
-  "position": {
-    "enabled": false,
-    "x": 0,
-    "y": 100,
-    "z": 0
-  },
   "utils": {
     "auto-auth": {
       "enabled": true,
       "password": ""
-    },
-    "anti-afk": {
-      "enabled": true,
-      "sneak": false
-    },
-    "chat-messages": {
-      "enabled": false,
-      "repeat": false,
-      "repeat-delay": 60000,
-      "messages": []
     },
     "chat-log": true,
     "auto-reconnect": true,
@@ -47,9 +31,7 @@
     "expedition-distance": 3000,
     "waypoint-distance": 12,
     "circle-walk": {
-      "enabled": false,
-      "radius": 4,
-      "speed": 3000
+      "enabled": false
     },
     "look-around": {
       "enabled": true,
@@ -64,18 +46,15 @@
     "threat-radius": 12,
     "player-personal-space": 5,
     "exploration-strategy": "persistent-frontier",
-    "remember-visited-regions": true,
-    "avoid-dangerous-blocks": true,
     "stuck-recovery": true,
-    "observe-players-without-following": true,
-    "recognize-landmarks": true
+    "remember-visited-regions": true,
+    "avoid-dangerous-terrain": true
   },
   "modules": {
     "avoidMobs": true,
     "combat": false,
     "beds": true,
-    "chat": true,
-    "console-commands": true
+    "chat": true
   },
   "combat": {
     "attack-mobs": false,
@@ -83,8 +62,8 @@
     "auto-eat": true
   },
   "beds": {
-    "pick-up-day": false,
-    "place-night": true
+    "place-night": true,
+    "pick-up-day": false
   },
   "discord": {
     "enabled": true,
@@ -94,9 +73,6 @@
       "disconnect": true,
       "chat": false
     }
-  },
-  "chat": {
-    "respond": false
   },
   "ai": {
     "enabled": true,
@@ -115,10 +91,10 @@
     "lore": {
       "name": "Aevoris",
       "title": "The Forgotten Entity",
-      "appearance": "A silent pale wanderer",
+      "appearance": "A pale silent wanderer",
       "origin": "An ancient figure drifting through forgotten worlds",
-      "purpose": "Discover the lost memories of a vanished world",
-      "personality": "Observant, eerie, patient, intelligent, nonviolent and lonely"
+      "purpose": "Discover lost memories of a vanished world",
+      "personality": "Intelligent, observant, mysterious, lonely and nonviolent"
     }
   }
 }
