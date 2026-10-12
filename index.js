@@ -1,1094 +1,486 @@
 
+'use strict';
+
+// AEVORIS — The Silent Wanderer
+// Minecraft Java 1.15.1
+// Requires: mineflayer, mineflayer-pathfinder,
+// minecraft-data, vec3, express
+
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalBlock } = goals;
+const { GoalNear } = goals;
+const Vec3 = require('vec3');
 const express = require('express');
 const http = require('http');
 const https = require('https');
 const readline = require('readline');
 const config = require('./settings.json');
 
+const options = config.utils || {};
+const movement = config.movement || {};
+const features = config.modules || {};
+const combat = config.combat || {};
+const sleeping = config.beds || {};
+
+const PORT = Number(process.env.PORT) || 8080;
+const MAX_RADIUS = Math.max(
+  8,
+  Math.min(32, Number(movement['wander-radius']) || 18)
+);
+
+const AUTO_RECONNECT = options['auto-reconnect'] !== false;
+
+const ATTACK =
+  features.combat &&
+  combat['attack-mobs'] &&
+  process.env.AEVORIS_COMBAT === 'true';
+
+const AUTH_PASSWORD =
+  process.env.MC_AUTH_PASSWORD ||
+  options['auto-auth']?.password ||
+  '';
+
+const now = () => Date.now();
+const rand = (a, b) =>
+  Math.floor(a + Math.random() * (b - a + 1));
+
+const announce = text =>
+  console.log(`[Aevoris] ${text}`);
+
+let session = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let closing = false;
+
+const startedAt = now();
+
+const history = {
+  lastKick: null,
+  lastError: null
+};
+
 // ============================================================
-// MINECRAFT AFK BOT v2.4 - STABILITY FIX EDITION
-// Minecraft 1.15.1 Compatible
+// DASHBOARD
 // ============================================================
 
 const app = express();
-const PORT = Number(process.env.PORT) || 5000;
 
-let bot = null;
-let currentSession = null;
-let reconnectTimer = null;
-let reconnectAttempts = 0;
-let shuttingDown = false;
+app.get('/health', (_req, res) => {
+  const live = session && isLive(session);
+  const p = live ? session.bot.entity.position : null;
 
-const state = {
-  connected: false,
-  startTime: Date.now(),
-  lastActivity: Date.now(),
-  connectedSince: null,
-  errors: [],
-  lastKick: null
-};
-
-const utils = config.utils || {};
-const movement = config.movement || {};
-const modules = config.modules || {};
-const combatSettings = config.combat || {};
-
-const AUTO_RECONNECT = utils['auto-reconnect'] !== false;
-
-// Attacking is OFF unless explicitly enabled.
-const ENABLE_ATTACKS =
-  process.env.BOT_ENABLE_ATTACKS === 'true' &&
-  combatSettings['attack-mobs'] === true;
-
-const ENABLE_CREATIVE =
-  process.env.BOT_ENABLE_CREATIVE === 'true';
-
-const AUTH_PASSWORD =
-  process.env.MC_AUTH_PASSWORD || '';
-
-function log(message) {
-  console.log(
-    `[${new Date().toISOString()}] ${message}`
-  );
-}
-
-function recordError(type, message) {
-  state.errors.push({
-    type,
-    message: String(message),
-    time: Date.now()
+  res.json({
+    name: config['bot-account'].username,
+    connected: !!live,
+    mode: live ? session.mode : 'offline',
+    position: p
+      ? {
+          x: +p.x.toFixed(1),
+          y: +p.y.toFixed(1),
+          z: +p.z.toFixed(1)
+        }
+      : null,
+    uptimeSeconds: Math.floor((now() - startedAt) / 1000),
+    reconnectAttempts,
+    lastKick: history.lastKick,
+    lastError: history.lastError
   });
+});
 
-  if (state.errors.length > 30) {
-    state.errors.shift();
-  }
-}
+app.get('/ping', (_req, res) => res.send('pong'));
 
-function isActive(session) {
-  return (
-    !shuttingDown &&
-    currentSession === session &&
-    bot === session.bot &&
-    !session.closed &&
-    state.connected &&
-    !!session.bot.entity
-  );
-}
-
-// ============================================================
-// WEB DASHBOARD
-// ============================================================
-
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
   res.send(`
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
-
-<title>Minecraft AFK Bot Dashboard</title>
-
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aevoris</title>
 <style>
-* {
-  box-sizing: border-box;
-}
-
 body {
-  margin: 0;
-  background: #0f172a;
-  color: #f8fafc;
-  font-family: Arial, sans-serif;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
+  background:#090b10;
+  color:#e5e7eb;
+  font:16px Arial;
+  min-height:95vh;
+  display:grid;
+  place-items:center;
 }
-
-.container {
-  background: #1e293b;
-  padding: 30px;
-  border-radius: 18px;
-  width: 90%;
-  max-width: 450px;
-  border: 1px solid #334155;
-  box-shadow: 0 0 35px #0d948844;
+main {
+  border:1px solid #3d4756;
+  border-radius:18px;
+  padding:28px;
+  max-width:430px;
+  width:82%;
+  box-shadow:0 0 55px #aab5d015;
 }
-
 h1 {
-  text-align: center;
-  color: #2dd4bf;
+  letter-spacing:5px;
+  color:#edf4ff;
 }
-
-.card {
-  background: #0f172a;
-  margin: 15px 0;
-  padding: 18px;
-  border-radius: 10px;
-  border-left: 4px solid #2dd4bf;
-}
-
-.label {
-  color: #94a3b8;
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.value {
-  color: #2dd4bf;
-  font-size: 19px;
-  margin-top: 8px;
-  overflow-wrap: anywhere;
-}
-
-.online {
-  color: #4ade80;
-}
-
-.offline {
-  color: #f87171;
-}
-
-.footer {
-  text-align: center;
-  font-size: 12px;
-  color: #64748b;
-  margin-top: 20px;
-}
+p { color:#aab5c9; }
+b { color:#fff; }
 </style>
 </head>
-
 <body>
-
-<div class="container">
-
-<h1>Minecraft AFK Bot</h1>
-
-<div class="card">
-<div class="label">Connection</div>
-<div class="value" id="status">Loading...</div>
-</div>
-
-<div class="card">
-<div class="label">Server</div>
-<div class="value">${config.server.ip}</div>
-</div>
-
-<div class="card">
-<div class="label">Coordinates</div>
-<div class="value" id="coords">Waiting...</div>
-</div>
-
-<div class="card">
-<div class="label">Uptime</div>
-<div class="value" id="uptime">0 seconds</div>
-</div>
-
-<div class="card">
-<div class="label">Reconnect Attempts</div>
-<div class="value" id="attempts">0</div>
-</div>
-
-<div class="card">
-<div class="label">Last Kick</div>
-<div class="value" id="kick">None</div>
-</div>
-
-<div class="footer">
-Minecraft AFK Bot v2.4
-</div>
-
-</div>
-
+<main>
+<h1>AEVORIS</h1>
+<p>The Silent Wanderer</p>
+<p>Presence: <b id="status">...</b></p>
+<p>Behaviour: <b id="mode">...</b></p>
+<p>Location: <b id="xyz">...</b></p>
+<p>Reconnects: <b id="tries">...</b></p>
+</main>
 <script>
-async function update() {
+async function refresh() {
   try {
-    const response = await fetch('/health');
-    const data = await response.json();
-
-    const status = document.getElementById('status');
-
-    if (data.status === 'connected') {
-      status.innerText = 'ONLINE';
-      status.className = 'value online';
-    } else {
-      status.innerText = 'RECONNECTING';
-      status.className = 'value offline';
-    }
-
-    document.getElementById('uptime').innerText =
-      data.uptime + ' seconds';
-
-    document.getElementById('attempts').innerText =
-      data.reconnectAttempts;
-
-    document.getElementById('kick').innerText =
-      data.lastKick || 'None';
-
-    if (data.coords) {
-      document.getElementById('coords').innerText =
-        Math.floor(data.coords.x) + ', ' +
-        Math.floor(data.coords.y) + ', ' +
-        Math.floor(data.coords.z);
-    } else {
-      document.getElementById('coords').innerText =
-        'Unknown';
-    }
-
-  } catch (error) {
-    document.getElementById('status').innerText =
-      'DASHBOARD OFFLINE';
+    const r = await fetch('/health');
+    const s = await r.json();
+    document.getElementById('status').textContent =
+      s.connected ? 'Manifested' : 'Absent';
+    document.getElementById('mode').textContent = s.mode;
+    document.getElementById('xyz').textContent =
+      s.position
+        ? Object.values(s.position).join(', ')
+        : 'Unknown';
+    document.getElementById('tries').textContent =
+      s.reconnectAttempts;
+  } catch (e) {
+    document.getElementById('status').textContent =
+      'Unknown';
   }
 }
-
-update();
-setInterval(update, 2000);
+refresh();
+setInterval(refresh, 3000);
 </script>
-
 </body>
 </html>
   `);
 });
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: state.connected ? 'connected' : 'disconnected',
-    uptime: Math.floor(
-      (Date.now() - state.startTime) / 1000
-    ),
-    coords:
-      state.connected && bot && bot.entity
-        ? bot.entity.position
-        : null,
-    reconnectAttempts,
-    lastActivity: state.lastActivity,
-    lastKick: state.lastKick,
-    errors: state.errors.slice(-5),
-    memoryMB: Math.round(
-      process.memoryUsage().heapUsed / 1048576
-    )
-  });
+const server = app.listen(PORT, '0.0.0.0', () => {
+  announce(`Dashboard on port ${PORT}`);
 });
 
-app.get('/ping', (req, res) => {
-  res.send('pong');
-});
+// Optional web monitoring.
+// This cannot keep an Aternos server running.
 
-const webServer = app.listen(PORT, '0.0.0.0', () => {
-  log(`[HTTP] Dashboard started on port ${PORT}`);
-});
+if (process.env.MONITOR_PING_URL) {
+  setInterval(() => {
+    try {
+      const uri = new URL(process.env.MONITOR_PING_URL);
+      const client =
+        uri.protocol === 'https:' ? https : http;
 
-// ============================================================
-// SELF PING
-// ============================================================
+      const request = client.get(
+        uri,
+        response => response.resume()
+      );
 
-function selfPing() {
-  const url =
-    process.env.RENDER_EXTERNAL_URL ||
-    `http://localhost:${PORT}`;
+      request.setTimeout(8000, () => request.destroy());
 
-  const client =
-    url.startsWith('https:') ? https : http;
-
-  try {
-    const request = client.get(
-      `${url.replace(/\/$/, '')}/ping`,
-      response => {
-        response.resume();
-      }
-    );
-
-    request.setTimeout(10000, () => {
-      request.destroy();
-    });
-
-    request.on('error', error => {
-      log(`[KeepAlive] ${error.message}`);
-    });
-
-  } catch (error) {
-    log(`[KeepAlive] ${error.message}`);
-  }
+      request.on('error', error => {
+        announce(`Monitoring ping: ${error.message}`);
+      });
+    } catch (error) {
+      announce(`Monitoring ping: ${error.message}`);
+    }
+  }, 10 * 60 * 1000);
 }
 
-setInterval(selfPing, 10 * 60 * 1000);
-
-log('[KeepAlive] Self-ping enabled');
-
 // ============================================================
-// DISCORD WEBHOOK
+// DISCORD
 // ============================================================
 
-function sendDiscord(message, color = 0x2dd4bf) {
-  const discord = config.discord;
+function sendDiscord(text, color = 0xb0c4de, event) {
+  const discord = config.discord || {};
 
   if (
-    !discord ||
     !discord.enabled ||
-    !discord.webhookUrl ||
-    discord.webhookUrl.includes('YOUR_DISCORD')
-  ) {
-    return;
-  }
+    (event && discord.events?.[event] === false)
+  ) return;
+
+  const urlText =
+    process.env.DISCORD_WEBHOOK_URL ||
+    discord.webhookUrl;
+
+  if (
+    !urlText ||
+    urlText.includes('YOUR_DISCORD')
+  ) return;
 
   try {
-    const url = new URL(discord.webhookUrl);
+    const uri = new URL(urlText);
 
-    const payload = JSON.stringify({
-      username: config.name || 'Minecraft AFK Bot',
+    if (uri.protocol !== 'https:') return;
+
+    const body = JSON.stringify({
+      username: 'Aevoris',
       embeds: [{
-        description: message,
+        description: text,
         color,
         timestamp: new Date().toISOString()
       }]
     });
 
-    const client =
-      url.protocol === 'https:' ? https : http;
-
-    const request = client.request({
-      hostname: url.hostname,
-      port: url.port || (
-        url.protocol === 'https:' ? 443 : 80
-      ),
-      path: url.pathname + url.search,
+    const req = https.request({
+      hostname: uri.hostname,
+      port: uri.port || 443,
+      path: uri.pathname + uri.search,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload)
+        'Content-Length': Buffer.byteLength(body)
       }
-    }, response => {
-      response.resume();
+    }, response => response.resume());
+
+    req.on('error', err => {
+      announce(`Discord: ${err.message}`);
     });
 
-    request.on('error', error => {
-      log(`[Discord] ${error.message}`);
-    });
+    req.end(body);
 
-    request.end(payload);
-
-  } catch (error) {
-    log(`[Discord] ${error.message}`);
+  } catch (err) {
+    announce(`Discord: ${err.message}`);
   }
 }
 
 // ============================================================
-// SESSION TIMER MANAGEMENT
+// SESSION MANAGEMENT
 // ============================================================
 
-function addInterval(session, callback, delay) {
-  const id = setInterval(() => {
-    if (!isActive(session)) return;
-
-    try {
-      const result = callback();
-
-      if (result && typeof result.catch === 'function') {
-        result.catch(error => {
-          log(`[Module] ${error.message}`);
-        });
-      }
-    } catch (error) {
-      log(`[Module] ${error.message}`);
-    }
-  }, Math.max(100, Number(delay) || 1000));
-
-  session.intervals.add(id);
-  return id;
+function isCurrent(s) {
+  return session === s && !s.closed && !closing;
 }
 
-function addTimeout(session, callback, delay) {
-  const id = setTimeout(() => {
-    session.timeouts.delete(id);
-
-    if (!isActive(session)) return;
-
-    try {
-      callback();
-    } catch (error) {
-      log(`[Timer] ${error.message}`);
-    }
-  }, delay);
-
-  session.timeouts.add(id);
-  return id;
-}
-
-function cleanupSession(session) {
-  if (session.cleaned) return;
-
-  session.cleaned = true;
-  session.closed = true;
-
-  log(
-    `[Cleanup] Clearing ${session.intervals.size} intervals`
+function isLive(s) {
+  return (
+    isCurrent(s) &&
+    s.spawned &&
+    !!s.bot.entity
   );
+}
 
-  for (const id of session.intervals) {
+function every(s, ms, fn) {
+  const id = setInterval(() => {
+    if (!isLive(s)) return;
+
+    try {
+      Promise.resolve(fn()).catch(err => {
+        announce(`Module: ${err.message}`);
+      });
+    } catch (err) {
+      announce(`Module: ${err.message}`);
+    }
+  }, ms);
+
+  s.intervals.add(id);
+  return id;
+}
+
+function later(s, ms, fn) {
+  const id = setTimeout(() => {
+    s.timeouts.delete(id);
+
+    if (!isLive(s)) return;
+
+    try {
+      Promise.resolve(fn()).catch(err => {
+        announce(`Timer: ${err.message}`);
+      });
+    } catch (err) {
+      announce(`Timer: ${err.message}`);
+    }
+  }, ms);
+
+  s.timeouts.add(id);
+  return id;
+}
+
+function cleanup(s) {
+  if (s.closed) return;
+
+  s.closed = true;
+
+  for (const id of s.intervals) {
     clearInterval(id);
   }
 
-  for (const id of session.timeouts) {
+  for (const id of s.timeouts) {
     clearTimeout(id);
   }
 
-  session.intervals.clear();
-  session.timeouts.clear();
+  s.intervals.clear();
+  s.timeouts.clear();
 
-  if (session.connectionTimeout) {
-    clearTimeout(session.connectionTimeout);
-    session.connectionTimeout = null;
+  if (s.connectTimer) {
+    clearTimeout(s.connectTimer);
   }
 
-  if (session.bot) {
-    try {
-      session.bot.clearControlStates();
-    } catch (error) {}
+  try {
+    s.bot.pathfinder.setGoal(null);
+  } catch (_) {}
 
-    try {
-      if (session.bot.pathfinder) {
-        session.bot.pathfinder.setGoal(null);
-      }
-    } catch (error) {}
-  }
+  try {
+    s.bot.clearControlStates();
+  } catch (_) {}
 }
 
 // ============================================================
-// RECONNECT SYSTEM
+// AUTOMATIC RECONNECTION
 // ============================================================
 
-function getReconnectDelay() {
-  const base = Math.max(
-    1000,
-    Number(utils['auto-reconnect-delay']) || 3000
-  );
-
-  const max = Math.max(
-    base,
-    Number(utils['max-reconnect-delay']) || 30000
-  );
-
-  const exponential = base *
-    Math.pow(2, Math.min(reconnectAttempts - 1, 5));
-
-  return Math.min(exponential, max);
-}
-
-function scheduleReconnect() {
+function reconnect() {
   if (
-    shuttingDown ||
+    closing ||
     !AUTO_RECONNECT ||
     reconnectTimer
-  ) {
-    return;
-  }
+  ) return;
 
   reconnectAttempts++;
 
-  const delay = getReconnectDelay();
+  const base = Math.max(
+    2000,
+    Number(options['auto-reconnect-delay']) || 3000
+  );
 
-  log(
-    `[Bot] Reconnecting in ${delay / 1000}s ` +
-    `(attempt #${reconnectAttempts})`
+  const cap = Math.max(
+    base,
+    Number(options['max-reconnect-delay']) || 60000
+  );
+
+  const delay = Math.min(
+    cap,
+    base * 2 ** Math.min(6, reconnectAttempts - 1)
+  );
+
+  announce(
+    `Reconnect in ${Math.round(delay / 1000)}s ` +
+    `(#${reconnectAttempts})`
   );
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    createBot();
+    connect();
   }, delay);
 }
 
-function disconnectSession(session, reason) {
-  if (session.closed) return;
+function finish(s, reason, deliberate = false) {
+  if (s.closed) return;
 
-  log(`[Bot] Disconnected: ${reason || 'Unknown'}`);
+  announce(`Disconnected: ${reason}`);
 
-  const wasConnected = state.connected;
+  const wasSpawned = s.spawned;
 
-  cleanupSession(session);
+  cleanup(s);
 
-  if (currentSession === session) {
-    state.connected = false;
-    state.connectedSince = null;
-    currentSession = null;
+  if (session === s) {
+    session = null;
 
-    if (
-      wasConnected &&
-      config.discord &&
-      config.discord.events &&
-      config.discord.events.disconnect
-    ) {
+    if (wasSpawned) {
       sendDiscord(
-        `[-] Disconnected: ${reason || 'Unknown'}`,
-        0xf87171
+        `Aevoris vanished: ${reason}`,
+        0xd77b83,
+        'disconnect'
       );
     }
 
-    scheduleReconnect();
+    if (!deliberate) reconnect();
   }
 }
 
-// ============================================================
-// BOT CREATION
-// ============================================================
-
-function createBot() {
-  if (shuttingDown) return;
-
-  if (currentSession && !currentSession.closed) {
-    log('[Bot] Existing session is still active');
-    return;
-  }
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  state.connected = false;
-
-  log('[Bot] Creating bot instance...');
-  log(
-    `[Bot] Connecting to ` +
-    `${config.server.ip}:${config.server.port}`
-  );
-
-  let newBot;
+function chatCommand(s, text) {
+  if (!isLive(s)) return;
 
   try {
-    newBot = mineflayer.createBot({
-      username: config['bot-account'].username,
-      password:
-        config['bot-account'].password || undefined,
-      auth: config['bot-account'].type,
-      host: config.server.ip,
-      port: Number(config.server.port),
-      version: config.server.version,
-      hideErrors: false,
-      checkTimeoutInterval: 120000
-    });
-  } catch (error) {
-    log(`[Bot] Creation failed: ${error.message}`);
-    recordError('creation', error.message);
-    scheduleReconnect();
-    return;
-  }
-
-  const session = {
-    bot: newBot,
-    closed: false,
-    cleaned: false,
-    spawned: false,
-    intervals: new Set(),
-    timeouts: new Set(),
-    connectionTimeout: null
-  };
-
-  bot = newBot;
-  currentSession = session;
-
-  try {
-    newBot.loadPlugin(pathfinder);
-  } catch (error) {
-    log(`[Pathfinder] ${error.message}`);
-
-    cleanupSession(session);
-    currentSession = null;
-
-    try {
-      newBot.end();
-    } catch (e) {}
-
-    scheduleReconnect();
-    return;
-  }
-
-  session.connectionTimeout = setTimeout(() => {
-    if (
-      currentSession !== session ||
-      session.closed ||
-      session.spawned
-    ) {
-      return;
-    }
-
-    log('[Bot] Connection timeout');
-
-    disconnectSession(session, 'Connection timeout');
-
-    try {
-      newBot.end();
-    } catch (error) {}
-  }, 60000);
-
-  // ==========================================================
-  // SPAWN
-  // ==========================================================
-
-  newBot.once('spawn', () => {
-    if (
-      currentSession !== session ||
-      session.closed
-    ) {
-      return;
-    }
-
-    session.spawned = true;
-
-    clearTimeout(session.connectionTimeout);
-    session.connectionTimeout = null;
-
-    state.connected = true;
-    state.connectedSince = Date.now();
-    state.lastActivity = Date.now();
-
-    log('[Bot] Successfully spawned on server!');
-
-    // Reset reconnect backoff only after stable uptime.
-    addTimeout(session, () => {
-      reconnectAttempts = 0;
-      log('[Bot] Connection stable; reconnect counter reset');
-    }, 120000);
-
-    if (
-      config.discord &&
-      config.discord.events &&
-      config.discord.events.connect
-    ) {
-      sendDiscord(
-        `[+] Connected to ${config.server.ip}`,
-        0x4ade80
-      );
-    }
-
-    try {
-      const mcData =
-        require('minecraft-data')(config.server.version);
-
-      const defaultMove =
-        new Movements(newBot, mcData);
-
-      initializeModules(
-        session,
-        mcData,
-        defaultMove
-      );
-
-    } catch (error) {
-      log(`[Modules] Initialization error: ${error.message}`);
-      recordError('modules', error.message);
-    }
-
-    if (ENABLE_CREATIVE) {
-      addTimeout(session, () => {
-        safeChat(session, '/gamemode creative');
-        log('[INFO] Creative mode requested');
-      }, 3000);
-    }
-  });
-
-  // ==========================================================
-  // KICK HANDLER
-  // ==========================================================
-
-  newBot.on('kicked', reason => {
-    const text =
-      typeof reason === 'string'
-        ? reason
-        : JSON.stringify(reason);
-
-    state.lastKick = text;
-
-    log(`[KICK] ${text}`);
-
-    if (text.includes('invalid_entity_attacked')) {
-      log(
-        '[Safety] Server rejected an entity attack. ' +
-        'Check combat settings or other attack plugins.'
-      );
-    }
-  });
-
-  // ==========================================================
-  // ERROR HANDLER
-  // ==========================================================
-
-  newBot.on('error', error => {
-    if (session.closed) return;
-
-    const message = error.message || String(error);
-
-    if (
-      error.code === 'EPIPE' ||
-      error.code === 'ECONNRESET'
-    ) {
-      log(`[Network] ${error.code}: socket interrupted`);
-    } else {
-      log(`[Bot] Error: ${message}`);
-    }
-
-    recordError('bot', message);
-
-    // Do not reconnect here.
-    // The end event handles normal disconnections.
-  });
-
-  // ==========================================================
-  // END HANDLER
-  // ==========================================================
-
-  newBot.once('end', reason => {
-    disconnectSession(session, reason);
-  });
-
-  // ==========================================================
-  // AUTO LOGIN
-  // ==========================================================
-
-  let authenticationSent = false;
-
-  newBot.on('messagestr', message => {
-    if (!isActive(session)) return;
-    if (!AUTH_PASSWORD || authenticationSent) return;
-
-    const lower = String(message).toLowerCase();
-
-    if (
-      lower.includes('/register') &&
-      lower.includes('register')
-    ) {
-      authenticationSent = true;
-
-      safeChat(
-        session,
-        `/register ${AUTH_PASSWORD} ${AUTH_PASSWORD}`
-      );
-
-      log('[Auth] Register command sent');
-      return;
-    }
-
-    if (lower.includes('/login')) {
-      authenticationSent = true;
-
-      safeChat(
-        session,
-        `/login ${AUTH_PASSWORD}`
-      );
-
-      log('[Auth] Login command sent');
-    }
-  });
-}
-
-// ============================================================
-// SAFE CHAT
-// ============================================================
-
-function safeChat(session, message) {
-  if (!isActive(session)) return false;
-
-  try {
-    session.bot.chat(message);
-    state.lastActivity = Date.now();
-    return true;
-  } catch (error) {
-    log(`[Chat] ${error.message}`);
-    return false;
+    s.bot.chat(text);
+  } catch (err) {
+    announce(`Command failed: ${err.message}`);
   }
 }
 
 // ============================================================
-// MODULE INITIALIZATION
+// TERRAIN SAFETY SCANNER
 // ============================================================
 
-function initializeModules(
-  session,
-  mcData,
-  defaultMove
-) {
-  log('[Modules] Initializing all modules...');
+const hazardous =
+  /lava|fire|magma|cactus|sweet_berry|campfire|powder_snow/;
 
-  const currentBot = session.bot;
+function footSafe(bot, x, y, z) {
+  const here = bot.blockAt(new Vec3(x, y, z));
+  const head = bot.blockAt(new Vec3(x, y + 1, z));
+  const floor = bot.blockAt(new Vec3(x, y - 1, z));
 
-  // ----------------------------------------------------------
-  // MOVE TO POSITION
-  // ----------------------------------------------------------
-
-  if (config.position && config.position.enabled) {
-    try {
-      currentBot.pathfinder.setMovements(defaultMove);
-
-      currentBot.pathfinder.setGoal(
-        new GoalBlock(
-          config.position.x,
-          config.position.y,
-          config.position.z
-        )
-      );
-    } catch (error) {
-      log(`[Position] ${error.message}`);
-    }
-  }
-
-  // ----------------------------------------------------------
-  // ANTI AFK
-  // ----------------------------------------------------------
+  if (!here || !head || !floor) return false;
 
   if (
-    utils['anti-afk'] &&
-    utils['anti-afk'].enabled
-  ) {
-    addInterval(session, () => {
-      currentBot.setControlState('jump', true);
-
-      addTimeout(session, () => {
-        currentBot.setControlState('jump', false);
-      }, 150);
-
-      state.lastActivity = Date.now();
-    }, 3000);
-
-    if (utils['anti-afk'].sneak) {
-      currentBot.setControlState('sneak', true);
-    }
-
-    log('[AntiAFK] Enabled');
-  }
-
-  // ----------------------------------------------------------
-  // CIRCLE WALK
-  // ----------------------------------------------------------
+    here.boundingBox !== 'empty' ||
+    head.boundingBox !== 'empty'
+  ) return false;
 
   if (
-    movement['circle-walk'] &&
-    movement['circle-walk'].enabled
-  ) {
-    startCircleWalk(
-      session,
-      defaultMove
-    );
-  }
-
-  // ----------------------------------------------------------
-  // RANDOM JUMP
-  // ----------------------------------------------------------
+    floor.boundingBox !== 'block' ||
+    hazardous.test(floor.name)
+  ) return false;
 
   if (
-    movement['random-jump'] &&
-    movement['random-jump'].enabled
-  ) {
-    startRandomJump(session);
-  }
-
-  // ----------------------------------------------------------
-  // LOOK AROUND
-  // ----------------------------------------------------------
+    hazardous.test(here.name) ||
+    hazardous.test(head.name)
+  ) return false;
 
   if (
-    movement['look-around'] &&
-    movement['look-around'].enabled
-  ) {
-    startLookAround(session);
-  }
+    here.name.includes('water') ||
+    head.name.includes('water')
+  ) return false;
 
-  // ----------------------------------------------------------
-  // AVOID MOBS
-  // ----------------------------------------------------------
-
-  if (modules.avoidMobs) {
-    avoidMobs(session);
-  }
-
-  // ----------------------------------------------------------
-  // COMBAT
-  // ----------------------------------------------------------
-
-  if (modules.combat) {
-    combatModule(session, mcData);
-  }
-
-  // ----------------------------------------------------------
-  // BEDS
-  // ----------------------------------------------------------
-
-  if (modules.beds) {
-    bedModule(session);
-  }
-
-  // ----------------------------------------------------------
-  // CHAT
-  // ----------------------------------------------------------
-
-  if (modules.chat) {
-    chatModule(session);
-  }
-
-  // ----------------------------------------------------------
-  // PERIODIC REJOIN
-  // ----------------------------------------------------------
-
-  if (
-    utils['periodic-rejoin'] &&
-    utils['periodic-rejoin'].enabled
-  ) {
-    periodicRejoin(session);
-  }
-
-  log('[Modules] All modules initialized!');
-}
-
-// ============================================================
-// CIRCLE WALK
-// ============================================================
-
-function startCircleWalk(session, defaultMove) {
-  const currentBot = session.bot;
-  const settings = movement['circle-walk'];
-
-  const radius = Number(settings.radius) || 3;
-  const speed = Math.max(
-    2000,
-    Number(settings.speed) || 4000
-  );
-
-  let angle = 0;
-
-  addInterval(session, () => {
-    if (!currentBot.entity) return;
-
-    try {
-      const pos = currentBot.entity.position;
-
-      const x =
-        pos.x + Math.cos(angle) * radius;
-
-      const z =
-        pos.z + Math.sin(angle) * radius;
-
-      currentBot.pathfinder.setMovements(defaultMove);
-
-      currentBot.pathfinder.setGoal(
-        new GoalBlock(
-          Math.floor(x),
-          Math.floor(pos.y),
-          Math.floor(z)
-        )
-      );
-
-      angle += Math.PI / 4;
-
-      state.lastActivity = Date.now();
-
-    } catch (error) {
-      log(`[CircleWalk] ${error.message}`);
-    }
-  }, speed);
-}
-
-// ============================================================
-// RANDOM JUMP
-// ============================================================
-
-function startRandomJump(session) {
-  const currentBot = session.bot;
-
-  const delay =
-    Number(movement['random-jump'].interval) || 5000;
-
-  addInterval(session, () => {
-    currentBot.setControlState('jump', true);
-
-    addTimeout(session, () => {
-      currentBot.setControlState('jump', false);
-    }, 300);
-
-    state.lastActivity = Date.now();
-  }, delay);
-}
-
-// ============================================================
-// LOOK AROUND
-// ============================================================
-
-function startLookAround(session) {
-  const currentBot = session.bot;
-
-  const delay =
-    Number(movement['look-around'].interval) || 5000;
-
-  addInterval(session, () => {
-    const yaw = Math.random() * Math.PI * 2;
-
-    const pitch =
-      (Math.random() - 0.5) * Math.PI / 4;
-
-    currentBot.look(yaw, pitch, true);
-
-    state.lastActivity = Date.now();
-  }, delay);
-}
-
-// ============================================================
-// AVOID MOBS
-// ============================================================
-
-function avoidMobs(session) {
-  const currentBot = session.bot;
-
-  addInterval(session, () => {
-    const entities = Object.values(
-      currentBot.entities
+  for (const [dx, dz] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1]
+  ]) {
+    const beside = bot.blockAt(
+      new Vec3(x + dx, y, z + dz)
     );
 
-    const danger = entities.find(entity => {
-      if (!entity || !entity.position) return false;
+    if (
+      beside &&
+      hazardous.test(beside.name)
+    ) return false;
+  }
 
-      if (
-        entity.type !== 'mob' &&
-        entity.type !== 'player'
-      ) {
-        return false;
-      }
+  return true;
+}
 
-      if (entity.id === currentBot.entity.id) {
-        return false;
-      }
+function findFoot(bot, x, z, suggestedY) {
+  x = Math.floor(x);
+  z = Math.floor(z);
 
-      if (entity.username === currentBot.username) {
-        return false;
-      }
+  const y0 = Math.floor(suggestedY);
 
-      return (
-        currentBot.entity.position.distanceTo(
-          entity.position
-        ) < 5
-      );
-    });
+  for (const dy of [
+    0, 1, -1, 2, -2, 3, -3, 4, -4
+  ]) {
+    const y = y0 + dy;
 
-    if (!danger) return;
+    if (footSafe(bot, x, y, z)) {
+      return { x, y, z };
+    }
+  }
 
-    currentBot.setControlState('back', true);
-
-    addTimeout(session, () => {
-      currentBot.setControlState('back', false);
-    }, 500);
-
-  }, 2000);
+  return null;
 }
 
 // ============================================================
-// SAFE COMBAT MODULE
+// MOB DETECTION
 // ============================================================
 
-function combatModule(session, mcData) {
-  const currentBot = session.bot;
+function nearbyThreat(s) {
+  if (!features.avoidMobs) return null;
 
-  const allowedMobs = new Set([
+  const p = s.bot.entity.position;
+
+  const dangerous = new Set([
     'zombie',
     'skeleton',
     'spider',
@@ -1096,433 +488,1033 @@ function combatModule(session, mcData) {
     'drowned',
     'husk',
     'stray',
-    'witch'
+    'witch',
+    'enderman',
+    'phantom',
+    'pillager'
   ]);
 
-  let lastAttack = 0;
+  return Object.values(s.bot.entities)
+    .filter(e =>
+      e &&
+      e.position &&
+      dangerous.has(e.name) &&
+      p.distanceTo(e.position) < 9
+    )
+    .sort((a, b) =>
+      p.distanceTo(a.position) -
+      p.distanceTo(b.position)
+    )[0] || null;
+}
 
-  if (ENABLE_ATTACKS) {
-    log('[Combat] Safe attacking enabled');
+// ============================================================
+// SMART DESTINATION SYSTEM
+// ============================================================
 
-    addInterval(session, () => {
-      if (!currentBot.entity) return;
+function setDestination(s, dest, mode) {
+  if (!isLive(s) || !dest) return false;
 
-      const now = Date.now();
+  try {
+    s.bot.pathfinder.setGoal(
+      new GoalNear(
+        dest.x,
+        dest.y,
+        dest.z,
+        1
+      )
+    );
 
-      if (now - lastAttack < 2000) return;
+    s.goal = dest;
+    s.mode = mode;
+    s.lastProgress = now();
+    s.lastPosition =
+      s.bot.entity.position.clone();
+    s.goalSince = now();
 
-      const target = Object.values(
-        currentBot.entities
-      ).find(entity => {
-        if (!entity || !entity.position) {
-          return false;
-        }
+    s.bot.setControlState('sneak', false);
 
-        if (entity.type !== 'mob') {
-          return false;
-        }
+    return true;
 
-        if (!allowedMobs.has(entity.name)) {
-          return false;
-        }
+  } catch (err) {
+    announce(`Path planning: ${err.message}`);
+    return false;
+  }
+}
 
-        if (entity.id === currentBot.entity.id) {
-          return false;
-        }
+function abandon(s, why) {
+  if (!isLive(s)) return;
 
-        if (
-          currentBot.entities[entity.id] !== entity
-        ) {
-          return false;
-        }
+  const old = s.goal;
 
-        const distance =
-          currentBot.entity.position.distanceTo(
-            entity.position
-          );
+  s.goal = null;
+  s.mode = 'searching';
+  s.pauseUntil = now() + rand(1500, 3500);
 
-        return distance > 0 && distance < 3.5;
-      });
+  try {
+    s.bot.pathfinder.setGoal(null);
+  } catch (_) {}
 
-      if (!target) return;
+  try {
+    s.bot.clearControlStates();
+  } catch (_) {}
 
-      // Recheck the entity immediately before attacking.
-      if (
-        currentBot.entities[target.id] !== target
-      ) {
-        return;
-      }
-
-      try {
-        currentBot.attack(target);
-        lastAttack = now;
-
-        state.lastActivity = now;
-
-      } catch (error) {
-        log(`[Combat] Attack blocked: ${error.message}`);
-      }
-
-    }, 1500);
-
-  } else {
-    log(
-      '[Combat] Automatic attacks disabled for safety'
+  if (old) {
+    s.badSpots.set(
+      `${old.x},${old.y},${old.z}`,
+      now() + 120000
     );
   }
 
-  // ----------------------------------------------------------
-  // AUTO EAT
-  // ----------------------------------------------------------
+  announce(`Finding another route (${why})`);
+}
 
-  let eating = false;
+function chooseDestination(s, threat = null) {
+  const b = s.bot;
+  const p = b.entity.position;
 
-  currentBot.on('health', async () => {
-    if (!isActive(session)) return;
-    if (!combatSettings['auto-eat']) return;
-    if (eating) return;
-    if (currentBot.food >= 14) return;
+  const landmark =
+    config.position?.enabled
+      ? config.position
+      : null;
 
-    const food = currentBot.inventory.items().find(
-      item => {
-        const itemData =
-          mcData.itemsByName[item.name];
+  const useLandmark =
+    landmark &&
+    Math.hypot(
+      p.x - landmark.x,
+      p.z - landmark.z
+    ) < 26 &&
+    Math.abs(p.y - landmark.y) < 7 &&
+    Math.random() < 0.10;
 
-        return itemData && itemData.food;
-      }
+  for (let attempt = 0; attempt < 45; attempt++) {
+    let x, z;
+
+    if (useLandmark && attempt < 12) {
+      x = landmark.x + rand(-7, 7);
+      z = landmark.z + rand(-7, 7);
+
+    } else if (threat) {
+      const away =
+        Math.atan2(
+          p.z - threat.position.z,
+          p.x - threat.position.x
+        ) +
+        (Math.random() - 0.5);
+
+      const r = rand(8, 14);
+
+      x = p.x + Math.cos(away) * r;
+      z = p.z + Math.sin(away) * r;
+
+    } else {
+      const angle =
+        Math.random() * Math.PI * 2;
+
+      const r = rand(6, MAX_RADIUS);
+
+      x = p.x + Math.cos(angle) * r;
+      z = p.z + Math.sin(angle) * r;
+    }
+
+    const candidate =
+      findFoot(b, x, z, p.y);
+
+    if (!candidate) continue;
+
+    if (
+      s.badSpots.get(
+        `${candidate.x},${candidate.y},${candidate.z}`
+      ) > now()
+    ) continue;
+
+    if (
+      threat &&
+      Math.hypot(
+        candidate.x - threat.position.x,
+        candidate.z - threat.position.z
+      ) < 9
+    ) continue;
+
+    return candidate;
+  }
+
+  return null;
+}
+
+// ============================================================
+// SILENT PLAYER OBSERVATION
+// ============================================================
+
+function watchSomeone(s) {
+  if (!isLive(s)) return false;
+
+  const p = s.bot.entity.position;
+
+  const strangers = Object.values(s.bot.players)
+    .map(player => player.entity)
+    .filter(e =>
+      e &&
+      e.id !== s.bot.entity.id &&
+      e.position &&
+      p.distanceTo(e.position) < 14
     );
 
-    if (!food) return;
+  if (
+    !strangers.length ||
+    Math.random() > 0.32
+  ) return false;
 
-    eating = true;
+  const target =
+    strangers[rand(0, strangers.length - 1)];
 
-    try {
-      await currentBot.equip(food, 'hand');
+  s.mode = 'watching';
+  s.pauseUntil =
+    now() + rand(3500, 8000);
 
-      if (!isActive(session)) return;
+  try {
+    s.bot.pathfinder.setGoal(null);
+  } catch (_) {}
 
-      await currentBot.consume();
+  s.goal = null;
 
-      state.lastActivity = Date.now();
+  try {
+    Promise.resolve(
+      s.bot.lookAt(
+        target.position.offset(0, 1.45, 0),
+        true
+      )
+    ).catch(() => {});
+  } catch (_) {}
 
-    } catch (error) {
-      log(`[AutoEat] ${error.message}`);
+  return true;
+}
 
-    } finally {
-      eating = false;
+// ============================================================
+// INTELLIGENT WANDERING BRAIN
+// ============================================================
+
+function startBrain(s) {
+  const b = s.bot;
+
+  const mcData =
+    require('minecraft-data')(config.server.version);
+
+  const moves =
+    new Movements(b, mcData);
+
+  moves.canDig = false;
+  moves.allow1by1towers = false;
+  moves.allowParkour = false;
+  moves.maxDropDown = 1;
+  moves.infiniteLiquidDropdownDistance = false;
+  moves.allowFreeMotion = false;
+  moves.allowSprinting = true;
+  moves.liquidCost = 25;
+
+  b.pathfinder.setMovements(moves);
+
+  b.pathfinder.thinkTimeout = 4000;
+  b.pathfinder.tickTimeout = 30;
+
+  b.on('goal_reached', () => {
+    if (!isLive(s) || !s.goal) return;
+
+    s.goal = null;
+    s.mode = 'observing';
+
+    s.pauseUntil =
+      now() + rand(3000, 13000);
+  });
+
+  b.on('path_update', result => {
+    if (!isLive(s) || !s.goal) return;
+
+    if (
+      result.status === 'noPath' ||
+      result.status === 'timeout'
+    ) {
+      abandon(s, result.status);
     }
   });
-}
 
-// ============================================================
-// BED MODULE
-// ============================================================
+  every(s, 1400, () => {
+    if (b.isSleeping || !b.entity) return;
+    if (s.busy) return;
 
-function bedModule(session) {
-  const currentBot = session.bot;
+    const threat = nearbyThreat(s);
 
-  let sleepingAttempt = false;
+    if (
+      threat &&
+      s.mode !== 'fleeing'
+    ) {
+      const escape =
+        chooseDestination(s, threat);
 
-  addInterval(session, async () => {
-    if (!config.beds) return;
-    if (!config.beds['place-night']) return;
-    if (sleepingAttempt) return;
-    if (currentBot.isSleeping) return;
-    if (!currentBot.time) return;
-
-    const time = currentBot.time.timeOfDay;
-
-    const isNight =
-      time >= 12500 && time <= 23500;
-
-    if (!isNight) return;
-
-    try {
-      const bed = currentBot.findBlock({
-        matching: block =>
-          block.name.includes('bed'),
-        maxDistance: 8
-      });
-
-      if (!bed) return;
-
-      sleepingAttempt = true;
-
-      await currentBot.sleep(bed);
-
-      log('[Bed] Sleeping');
-
-    } catch (error) {
-      // Sleeping may fail when a bed is occupied,
-      // monsters are nearby, or the server denies it.
-    } finally {
-      sleepingAttempt = false;
+      if (escape) {
+        setDestination(
+          s,
+          escape,
+          'fleeing'
+        );
+      }
     }
 
-  }, 10000);
-}
+    if (s.goal) return;
 
-// ============================================================
-// CHAT MODULE
-// ============================================================
-
-function chatModule(session) {
-  const currentBot = session.bot;
-
-  currentBot.on('chat', (username, message) => {
-    if (!isActive(session)) return;
-    if (username === currentBot.username) return;
-
-    if (!config.chat || !config.chat.respond) {
+    if (now() < s.pauseUntil) {
+      b.setControlState(
+        'sneak',
+        !!options['anti-afk']?.sneak
+      );
       return;
     }
 
-    const lower = message.toLowerCase();
+    b.setControlState('sneak', false);
+
+    if (watchSomeone(s)) return;
+
+    const dest =
+      chooseDestination(s, threat);
+
+    if (!dest) {
+      s.mode = 'searching';
+      s.pauseUntil = now() + 4500;
+      return;
+    }
+
+    setDestination(
+      s,
+      dest,
+      threat ? 'fleeing' : 'wandering'
+    );
+  });
+
+  // Stuck detection
+
+  every(s, 2500, () => {
+    if (
+      !s.goal ||
+      !b.entity ||
+      b.isSleeping
+    ) return;
 
     if (
-      /\b(hello|hi)\b/.test(lower)
+      b.entity.position.distanceTo(
+        s.lastPosition
+      ) >= 1.1
     ) {
-      safeChat(
-        session,
-        `Hello, ${username}!`
+      s.lastPosition =
+        b.entity.position.clone();
+
+      s.lastProgress = now();
+    }
+
+    if (
+      now() - s.lastProgress > 12000 ||
+      now() - s.goalSince > 50000
+    ) {
+      abandon(
+        s,
+        'stuck or unreachable'
       );
     }
 
-    if (message.startsWith('!tp ')) {
-      const target = message.split(' ')[1];
+    for (const [key, expiry] of s.badSpots) {
+      if (expiry < now()) {
+        s.badSpots.delete(key);
+      }
+    }
+  });
+
+  // Look around while idle
+
+  if (movement['look-around']?.enabled) {
+    every(
+      s,
+      Math.max(
+        3000,
+        Number(
+          movement['look-around'].interval
+        ) || 5000
+      ),
+      () => {
+        if (
+          s.goal ||
+          s.mode === 'watching' ||
+          b.isSleeping
+        ) return;
+
+        try {
+          Promise.resolve(
+            b.look(
+              Math.random() * Math.PI * 2,
+              (Math.random() - 0.5) * 0.35,
+              true
+            )
+          ).catch(() => {});
+        } catch (_) {}
+      }
+    );
+  }
+
+  // Occasional idle jumping
+
+  if (
+    movement['random-jump']?.enabled &&
+    options['anti-afk']?.enabled
+  ) {
+    every(
+      s,
+      Math.max(
+        9000,
+        Number(
+          movement['random-jump'].interval
+        ) || 12000
+      ),
+      () => {
+        if (
+          s.goal ||
+          s.mode === 'watching' ||
+          !b.entity.onGround ||
+          b.isSleeping ||
+          Math.random() > 0.22
+        ) return;
+
+        b.setControlState('jump', true);
+
+        later(s, 230, () => {
+          b.setControlState(
+            'jump',
+            false
+          );
+        });
+      }
+    );
+  }
+}
+
+// ============================================================
+// SURVIVAL, COMBAT AND BEDS
+// ============================================================
+
+function startSurvival(s) {
+  const b = s.bot;
+  const mcData =
+    require('minecraft-data')(config.server.version);
+
+  // Auto-eat
+
+  if (
+    features.combat &&
+    combat['auto-eat']
+  ) {
+    every(s, 6000, async () => {
+      if (
+        s.busy ||
+        b.isSleeping ||
+        b.food === undefined ||
+        b.food >= 14
+      ) return;
+
+      const food =
+        b.inventory.items().find(item => {
+          const data =
+            mcData.itemsByName[item.name];
+
+          return data &&
+            (
+              data.foodPoints > 0 ||
+              data.food
+            );
+        });
+
+      if (!food) return;
+
+      s.busy = true;
+
+      try {
+        await b.equip(food, 'hand');
+
+        if (isLive(s)) {
+          await b.consume();
+        }
+
+      } catch (err) {
+        announce(`Eating: ${err.message}`);
+      } finally {
+        s.busy = false;
+      }
+    });
+  }
+
+  // Optional safe combat
+
+  if (ATTACK) {
+    const allowed = new Set([
+      'zombie',
+      'skeleton',
+      'spider',
+      'drowned',
+      'husk',
+      'stray'
+    ]);
+
+    let lastAttack = 0;
+
+    every(s, 2000, () => {
+      if (
+        s.busy ||
+        now() - lastAttack < 2000
+      ) return;
+
+      const target =
+        Object.values(b.entities).find(e =>
+          e &&
+          e.type === 'mob' &&
+          allowed.has(e.name) &&
+          e.position &&
+          b.entities[e.id] === e &&
+          e.id !== b.entity.id &&
+          b.entity.position.distanceTo(
+            e.position
+          ) < 3
+        );
+
+      if (!target) return;
+
+      try {
+        b.attack(target);
+        lastAttack = now();
+      } catch (err) {
+        announce(`Combat: ${err.message}`);
+      }
+    });
+  }
+
+  // Nighttime beds and daytime recovery
+
+  if (
+    features.beds &&
+    (
+      sleeping['place-night'] ||
+      sleeping['pick-up-day']
+    )
+  ) {
+    let lastAttempt = 0;
+
+    every(s, 10000, async () => {
+      if (
+        s.busy ||
+        !b.time ||
+        !b.entity
+      ) return;
+
+      const time = b.time.timeOfDay;
+      const night =
+        time >= 12500 &&
+        time <= 23500;
+
+      // Recover only beds placed by Aevoris.
 
       if (
-        target &&
-        /^[a-zA-Z0-9_]{1,16}$/.test(target)
+        !night &&
+        sleeping['pick-up-day'] &&
+        s.placedBed
       ) {
-        safeChat(
-          session,
-          `/tp ${target}`
+        const p = s.placedBed;
+        const block = b.blockAt(p);
+
+        if (
+          !block ||
+          !block.name.endsWith('_bed')
+        ) {
+          s.placedBed = null;
+          return;
+        }
+
+        if (
+          b.entity.position.distanceTo(p) > 4.5
+        ) return;
+
+        s.busy = true;
+
+        try {
+          b.pathfinder.setGoal(null);
+          s.goal = null;
+
+          await b.dig(block);
+
+          s.placedBed = null;
+
+        } catch (err) {
+          announce(
+            `Bed pickup: ${err.message}`
+          );
+        } finally {
+          s.busy = false;
+        }
+
+        return;
+      }
+
+      if (
+        !night ||
+        !sleeping['place-night'] ||
+        b.isSleeping ||
+        now() - lastAttempt < 45000
+      ) return;
+
+      lastAttempt = now();
+      s.busy = true;
+
+      try {
+        b.pathfinder.setGoal(null);
+        s.goal = null;
+
+        let bed = b.findBlock({
+          matching: block =>
+            block.name.endsWith('_bed'),
+          maxDistance: 5
+        });
+
+        if (!bed) {
+          const bedItem =
+            b.inventory.items().find(i =>
+              i.name.endsWith('_bed')
+            );
+
+          if (bedItem) {
+            const pos = b.entity.position;
+
+            for (const [dx, dz] of [
+              [1, 0],
+              [-1, 0],
+              [0, 1],
+              [0, -1]
+            ]) {
+              const spot = findFoot(
+                b,
+                pos.x + dx,
+                pos.z + dz,
+                pos.y
+              );
+
+              if (!spot) continue;
+
+              if (
+                b.entity.position.distanceTo(
+                  new Vec3(
+                    spot.x,
+                    spot.y,
+                    spot.z
+                  )
+                ) > 4.4
+              ) continue;
+
+              const floor = b.blockAt(
+                new Vec3(
+                  spot.x,
+                  spot.y - 1,
+                  spot.z
+                )
+              );
+
+              if (!floor) continue;
+
+              try {
+                await b.equip(
+                  bedItem,
+                  'hand'
+                );
+
+                await b.placeBlock(
+                  floor,
+                  new Vec3(0, 1, 0)
+                );
+
+                bed = b.blockAt(
+                  new Vec3(
+                    spot.x,
+                    spot.y,
+                    spot.z
+                  )
+                );
+
+                if (
+                  bed &&
+                  bed.name.endsWith('_bed')
+                ) {
+                  s.placedBed =
+                    bed.position.clone();
+                }
+
+                break;
+              } catch (_) {}
+            }
+          }
+        }
+
+        if (
+          isLive(s) &&
+          bed &&
+          bed.name.endsWith('_bed')
+        ) {
+          try {
+            await b.sleep(bed);
+            s.mode = 'sleeping';
+          } catch (_) {}
+        }
+
+      } catch (err) {
+        announce(`Bed: ${err.message}`);
+      } finally {
+        s.busy = false;
+      }
+    });
+  }
+
+  b.on('wake', () => {
+    if (isLive(s)) {
+      s.mode = 'observing';
+      s.pauseUntil = now() + 3000;
+    }
+  });
+
+  // Read chat, never automatically reply.
+
+  if (
+    features.chat &&
+    options['chat-log']
+  ) {
+    b.on('messagestr', message => {
+      if (isCurrent(s)) {
+        announce(
+          `[Server chat] ${String(message)}`
+        );
+      }
+    });
+  }
+}
+
+// ============================================================
+// CONNECTION
+// ============================================================
+
+function connect() {
+  if (closing || session) return;
+
+  announce(
+    `Connecting ${config.server.ip}:` +
+    `${config.server.port} as ` +
+    config['bot-account'].username
+  );
+
+  let b;
+
+  try {
+    b = mineflayer.createBot({
+      username:
+        config['bot-account'].username,
+      password:
+        config['bot-account'].password ||
+        undefined,
+      auth:
+        config['bot-account'].type ||
+        'offline',
+      host: config.server.ip,
+      port: Number(config.server.port),
+      version: config.server.version,
+      hideErrors: true,
+      checkTimeoutInterval: 120000
+    });
+  } catch (err) {
+    history.lastError = err.message;
+
+    announce(
+      `Creation failed: ${err.message}`
+    );
+
+    reconnect();
+    return;
+  }
+
+  const s = {
+    bot: b,
+    spawned: false,
+    closed: false,
+    intervals: new Set(),
+    timeouts: new Set(),
+    connectTimer: null,
+    busy: false,
+    goal: null,
+    mode: 'connecting',
+    pauseUntil: 0,
+    goalSince: 0,
+    lastProgress: 0,
+    lastPosition: null,
+    badSpots: new Map(),
+    placedBed: null
+  };
+
+  session = s;
+
+  try {
+    b.loadPlugin(pathfinder);
+  } catch (err) {
+    history.lastError = err.message;
+
+    finish(s, err.message);
+
+    try {
+      b.end();
+    } catch (_) {}
+
+    return;
+  }
+
+  // Authentication only — no normal chat messages.
+
+  let authenticated = false;
+
+  b.on('messagestr', message => {
+    if (
+      !isCurrent(s) ||
+      !options['auto-auth']?.enabled ||
+      !AUTH_PASSWORD ||
+      authenticated
+    ) return;
+
+    const msg =
+      String(message).toLowerCase();
+
+    let command = null;
+
+    if (msg.includes('/register')) {
+      command =
+        `/register ${AUTH_PASSWORD} ` +
+        AUTH_PASSWORD;
+    } else if (msg.includes('/login')) {
+      command =
+        `/login ${AUTH_PASSWORD}`;
+    }
+
+    if (command) {
+      authenticated = true;
+
+      try {
+        b.chat(command);
+
+        announce(
+          'Authentication command sent'
+        );
+      } catch (err) {
+        authenticated = false;
+
+        announce(
+          `Authentication: ${err.message}`
         );
       }
     }
   });
-}
 
-// ============================================================
-// PERIODIC REJOIN
-// ============================================================
+  b.once('spawn', () => {
+    if (!isCurrent(s)) return;
 
-function periodicRejoin(session) {
-  const settings = utils['periodic-rejoin'];
+    s.spawned = true;
 
-  // Default 30 minutes if no interval is configured.
-  const delay = Math.max(
-    60000,
-    Number(settings.interval) || 1800000
-  );
+    if (s.connectTimer) {
+      clearTimeout(s.connectTimer);
+    }
 
-  log(
-    `[Rejoin] Periodic rejoin every ${delay / 60000} minutes`
-  );
+    s.mode = 'observing';
+    s.pauseUntil =
+      now() + rand(1500, 4500);
 
-  addInterval(session, () => {
-    log('[Rejoin] Performing scheduled rejoin');
-
-    const currentBot = session.bot;
-
-    disconnectSession(
-      session,
-      'Periodic Rejoin'
+    announce(
+      'Aevoris has manifested. ' +
+      'In-game speech disabled.'
     );
 
-    try {
-      currentBot.end();
-    } catch (error) {}
+    sendDiscord(
+      'Aevoris appeared in the world.',
+      0xb0c4de,
+      'connect'
+    );
 
-  }, delay);
+    later(s, 120000, () => {
+      reconnectAttempts = 0;
+    });
+
+    try {
+      if (movement.enabled !== false) {
+        startBrain(s);
+      }
+
+      startSurvival(s);
+
+    } catch (err) {
+      history.lastError = err.message;
+
+      announce(
+        `Module initialization: ${err.message}`
+      );
+    }
+  });
+
+  b.on('kicked', reason => {
+    if (!isCurrent(s)) return;
+
+    const text =
+      typeof reason === 'string'
+        ? reason
+        : JSON.stringify(reason);
+
+    history.lastKick = text;
+
+    announce(`Kicked: ${text}`);
+  });
+
+  b.on('error', err => {
+    if (!isCurrent(s)) return;
+
+    history.lastError = err.message;
+
+    announce(
+      `Network: ${err.code || err.message}`
+    );
+  });
+
+  b.once('end', reason => {
+    finish(
+      s,
+      reason || 'socket closed'
+    );
+  });
+
+  s.connectTimer = setTimeout(() => {
+    if (s.closed || s.spawned) return;
+
+    finish(s, 'spawn timeout');
+
+    try {
+      b.end();
+    } catch (_) {}
+
+  }, 60000);
 }
 
 // ============================================================
 // CONSOLE COMMANDS
 // ============================================================
 
-const rl = readline.createInterface({
+const cli = readline.createInterface({
   input: process.stdin,
-  output: process.stdout,
   terminal: false
 });
 
-rl.on('line', line => {
+cli.on('line', line => {
   const command = line.trim();
+  const s = session;
 
   if (command === 'status') {
-    log(
-      `[Status] Connected=${state.connected}, ` +
-      `Reconnects=${reconnectAttempts}`
+    return announce(
+      s && isLive(s)
+        ? `ONLINE, ${s.mode}, ` +
+          s.bot.entity.position
+        : 'OFFLINE'
     );
-    return;
   }
 
   if (command === 'reconnect') {
-    log('[Console] Manual reconnect requested');
-
-    if (currentSession) {
-      const session = currentSession;
-
-      disconnectSession(
-        session,
-        'Manual Reconnect'
+    if (s) {
+      finish(
+        s,
+        'console reconnect'
       );
 
       try {
-        session.bot.end();
-      } catch (error) {}
+        s.bot.end();
+      } catch (_) {}
+    }
 
-    } else {
-      scheduleReconnect();
+    if (!reconnectTimer) {
+      reconnect();
     }
 
     return;
   }
 
-  if (!currentSession || !isActive(currentSession)) {
-    log('[Console] Bot is not connected');
-    return;
+  if (!s || !isLive(s)) {
+    return announce('Not connected');
   }
 
   if (command.startsWith('say ')) {
-    safeChat(
-      currentSession,
+    chatCommand(
+      s,
       command.slice(4)
     );
 
   } else if (command.startsWith('cmd ')) {
-    safeChat(
-      currentSession,
+    chatCommand(
+      s,
       '/' + command.slice(4)
     );
 
-  } else if (command) {
-    safeChat(currentSession, command);
+  } else if (command === 'wander') {
+    abandon(s, 'console');
+    s.pauseUntil = 0;
   }
 });
 
 // ============================================================
-// MEMORY MONITOR
+// SHUTDOWN
 // ============================================================
 
-setInterval(() => {
-  const memory =
-    process.memoryUsage().heapUsed / 1048576;
+function shutdown() {
+  if (closing) return;
 
-  log(
-    `[Memory] Heap: ${memory.toFixed(2)} MB`
-  );
-}, 5 * 60 * 1000);
-
-// ============================================================
-// PROCESS ERROR HANDLERS
-// ============================================================
-
-process.on('uncaughtException', error => {
-  log(`[FATAL] ${error.message}`);
-
-  recordError(
-    'uncaughtException',
-    error.message
-  );
-
-  // A process-level exception can leave state corrupted.
-  // Exit so the hosting supervisor can restart cleanly.
-  shutdown(1);
-});
-
-process.on('unhandledRejection', reason => {
-  const message =
-    reason instanceof Error
-      ? reason.message
-      : String(reason);
-
-  log(`[Promise] ${message}`);
-
-  recordError(
-    'unhandledRejection',
-    message
-  );
-});
-
-// ============================================================
-// GRACEFUL SHUTDOWN
-// ============================================================
-
-function shutdown(exitCode = 0) {
-  if (shuttingDown) return;
-
-  shuttingDown = true;
-
-  log('[System] Shutting down...');
+  closing = true;
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
-    reconnectTimer = null;
   }
 
-  if (currentSession) {
-    const session = currentSession;
+  if (session) {
+    const s = session;
 
-    cleanupSession(session);
-    currentSession = null;
-    state.connected = false;
+    cleanup(s);
+    session = null;
 
     try {
-      session.bot.end();
-    } catch (error) {}
+      s.bot.end();
+    } catch (_) {}
   }
 
-  try {
-    webServer.close();
-  } catch (error) {}
-
-  process.exitCode = exitCode;
-
-  // Ensure the process does not hang on open sockets.
-  setTimeout(() => {
-    process.exit(exitCode);
-  }, 1000).unref();
+  server.close();
+  process.exit(0);
 }
 
-process.on('SIGTERM', () => {
-  shutdown(0);
-});
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
 
-process.on('SIGINT', () => {
-  shutdown(0);
+process.on('unhandledRejection', err => {
+  history.lastError = String(err);
+
+  announce(
+    `Unhandled rejection: ${err}`
+  );
 });
 
 // ============================================================
-// START BOT
+// START AEVORIS
 // ============================================================
 
-console.log('='.repeat(55));
-console.log(' Minecraft AFK Bot v2.4 - Stability Fix Edition');
-console.log('='.repeat(55));
+announce('AEVORIS — The Silent Wanderer');
 
-console.log(
-  `Server: ${config.server.ip}:${config.server.port}`
+announce(
+  'Smart wandering ON | ' +
+  'Chat OFF | ' +
+  `Combat ${ATTACK ? 'ON' : 'OFF'}`
 );
 
-console.log(
-  `Version: ${config.server.version}`
-);
-
-console.log(
-  `Auto-Reconnect: ${AUTO_RECONNECT ? 'ON' : 'OFF'}`
-);
-
-console.log(
-  `Automatic Attacks: ${ENABLE_ATTACKS ? 'ON' : 'OFF'}`
-);
-
-console.log(
-  `Creative Mode Command: ${ENABLE_CREATIVE ? 'ON' : 'OFF'}`
-);
-
-console.log('='.repeat(55));
-
-createBot();
+connect();
