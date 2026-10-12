@@ -1,80 +1,65 @@
 
 {
   "name": "Aevoris — The Forgotten Entity",
-
   "bot-account": {
     "username": "Aevoris",
     "password": "",
     "type": "offline"
   },
-
   "server": {
     "ip": "TheWorldStorm.aternos.me",
     "port": 35601,
     "version": "1.15.1"
   },
-
   "position": {
     "enabled": false,
     "x": 0,
     "y": 100,
     "z": 0
   },
-
   "utils": {
     "auto-auth": {
       "enabled": true,
       "password": ""
     },
-
     "anti-afk": {
       "enabled": true,
       "sneak": false
     },
-
     "chat-messages": {
       "enabled": false,
       "repeat": false,
       "repeat-delay": 60000,
       "messages": []
     },
-
     "chat-log": true,
-
     "auto-reconnect": true,
     "auto-reconnect-delay": 60000,
     "max-reconnect-delay": 300000,
-
     "periodic-rejoin": {
       "enabled": false,
       "min-interval": 20,
       "max-interval": 60
     }
   },
-
   "movement": {
     "enabled": true,
-
     "expedition-distance": 3000,
     "waypoint-distance": 12,
-
     "circle-walk": {
       "enabled": false,
       "radius": 4,
       "speed": 3000
     },
-
     "look-around": {
       "enabled": true,
       "interval": 5000
     },
-
     "random-jump": {
       "enabled": true,
       "interval": 11000
     }
   },
-
   "modules": {
     "avoidMobs": true,
     "combat": true,
@@ -82,17 +67,14 @@
     "chat": true,
     "console-commands": true
   },
-
   "combat": {
     "attack-mobs": false,
     "auto-eat": true
   },
-
   "beds": {
     "pick-up-day": true,
     "place-night": true
   },
-
   "discord": {
     "enabled": true,
     "webhookUrl": "",
@@ -102,30 +84,23 @@
       "chat": false
     }
   },
-
   "chat": {
     "respond": false
   },
-
   "ai": {
     "enabled": true,
     "provider": "groq",
     "model": "openai/gpt-oss-20b",
-
     "language": "morse",
     "morse-only": true,
-
     "message-cooldown-ms": 240000,
     "player-cooldown-ms": 600000,
-
     "ambient-check-ms": 180000,
     "ambient-chance": 0.3,
     "reply-chance": 0.6,
-
     "memory-enabled": true,
     "remember-players": true,
     "fallback-enabled": true,
-
     "lore": {
       "name": "Aevoris",
       "title": "The Forgotten Entity",
@@ -133,155 +108,6 @@
       "origin": "An ancient figure wandering the remnants of a forgotten world",
       "purpose": "To find pieces of a vanished memory",
       "personality": "Silent, curious, unsettling and lonely"
-    }
-  }
-}
-
-{
-  "name": "Aevoris — The Forgotten Entity",
-
-  "bot-account": {
-    "username": "Aevoris",
-    "password": "",
-    "type": "offline"
-  },
-
-  "server": {
-    "ip": "TheWorldStorm.aternos.me",
-    "port": 35601,
-    "version": "1.15.1"
-  },
-
-  "position": {
-    "enabled": false,
-    "x": 0,
-    "y": 100,
-    "z": 0
-  },
-
-  "utils": {
-    "auto-auth": {
-      "enabled": true,
-      "password": ""
-    },
-
-    "anti-afk": {
-      "enabled": true,
-      "sneak": true
-    },
-
-    "chat-messages": {
-      "enabled": false,
-      "repeat": false,
-      "repeat-delay": 60000,
-      "messages": []
-    },
-
-    "chat-log": true,
-
-    "auto-reconnect": true,
-    "auto-reconnect-delay": 60000,
-    "max-reconnect-delay": 300000,
-
-    "periodic-rejoin": {
-      "enabled": false,
-      "min-interval": 20,
-      "max-interval": 60
-    }
-  },
-
-  "movement": {
-    "enabled": true,
-
-    "expedition-distance": 3000,
-    "waypoint-distance": 22,
-
-    "circle-walk": {
-      "enabled": false,
-      "radius": 4,
-      "speed": 3000
-    },
-
-    "look-around": {
-      "enabled": true,
-      "interval": 5000
-    },
-
-    "random-jump": {
-      "enabled": true,
-      "interval": 10000
-    }
-  },
-
-  "modules": {
-    "avoidMobs": true,
-    "combat": true,
-    "beds": true,
-    "chat": true,
-    "console-commands": true
-  },
-
-  "combat": {
-    "attack-mobs": false,
-    "auto-eat": true
-  },
-
-  "beds": {
-    "pick-up-day": true,
-    "place-night": true
-  },
-
-  "discord": {
-    "enabled": true,
-    "webhookUrl": "",
-    "events": {
-      "connect": true,
-      "disconnect": true,
-      "chat": false
-    }
-  },
-
-  "chat": {
-    "respond": false
-  },
-
-  "ai": {
-    "enabled": true,
-    "provider": "groq",
-    "model": "openai/gpt-oss-20b",
-
-    "language": "morse",
-    "morse-only": true,
-
-    "message-cooldown-ms": 240000,
-    "player-cooldown-ms": 600000,
-
-    "ambient-check-ms": 180000,
-    "ambient-chance": 0.3,
-    "reply-chance": 0.6,
-
-    "memory-enabled": true,
-    "remember-players": true,
-
-    "fallback-enabled": true,
-
-    "lore": {
-      "name": "Aevoris",
-      "title": "The Forgotten Entity",
-
-      "appearance": "A lifeless pale white wanderer",
-
-      "origin": "Aevoris emerged from the silence between forgotten worlds. Nobody knows when he appeared. He wanders through ancient forests, lonely mountains and ruined places, remembering fragments of civilizations that no longer exist.",
-
-      "purpose": "Search the world for memories that no longer belong to anyone.",
-
-      "personality": "Quiet, eerie, unsettling, intelligent, mysterious, lonely and extremely observant.",
-
-      "communication": "Aevoris speaks only through Morse code.",
-
-      "behaviour": "Aevoris travels enormous distances, watches nearby players, remembers their presence and occasionally transmits mysterious messages.",
-
-      "mystery": "He remembers a world that may never have existed."
     }
   }
 }
