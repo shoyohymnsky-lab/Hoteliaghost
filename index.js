@@ -1,1070 +1,545 @@
 
 'use strict';
 
-// AEVORIS — The Silent Wanderer
-// Minecraft Java 1.15.1
-// Requires: mineflayer, mineflayer-pathfinder,
-// minecraft-data, vec3, express
+// AEVORIS v3.0 — THE SILENT EXPLORER
+// Minecraft Java Edition 1.15.1
 
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const { GoalNear } = goals;
 const Vec3 = require('vec3');
 const express = require('express');
-const http = require('http');
 const https = require('https');
 const readline = require('readline');
 const config = require('./settings.json');
 
-const options = config.utils || {};
+const utils = config.utils || {};
 const movement = config.movement || {};
-const features = config.modules || {};
+const modules = config.modules || {};
 const combat = config.combat || {};
-const sleeping = config.beds || {};
+const beds = config.beds || {};
 
 const PORT = Number(process.env.PORT) || 8080;
-const MAX_RADIUS = Math.max(
-  8,
-  Math.min(32, Number(movement['wander-radius']) || 18)
-);
-
-const AUTO_RECONNECT = options['auto-reconnect'] !== false;
-
-const ATTACK =
-  features.combat &&
-  combat['attack-mobs'] &&
-  process.env.AEVORIS_COMBAT === 'true';
-
-const AUTH_PASSWORD =
-  process.env.MC_AUTH_PASSWORD ||
-  options['auto-auth']?.password ||
-  '';
-
-const now = () => Date.now();
-const rand = (a, b) =>
-  Math.floor(a + Math.random() * (b - a + 1));
-
-const announce = text =>
-  console.log(`[Aevoris] ${text}`);
+const EXPEDITION = Math.max(128, Number(movement['expedition-distance']) || 3000);
+const WAYPOINT = Math.max(12, Math.min(28, Number(movement['waypoint-distance']) || 22));
+const ATTACK = process.env.AEVORIS_COMBAT === 'true' && combat['attack-mobs'] === true;
+const PASSWORD = process.env.MC_AUTH_PASSWORD || utils['auto-auth']?.password || '';
+const rand = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+const log = text => console.log(`[Aevoris] ${text}`);
 
 let session = null;
 let reconnectTimer = null;
-let reconnectAttempts = 0;
-let closing = false;
+let attempts = 0;
+let shuttingDown = false;
 
-const startedAt = now();
+const started = Date.now();
+const history = { kick: null, error: null };
 
-const history = {
-  lastKick: null,
-  lastError: null
-};
-
-// ============================================================
 // DASHBOARD
-// ============================================================
-
 const app = express();
 
-app.get('/health', (_req, res) => {
-  const live = session && isLive(session);
-  const p = live ? session.bot.entity.position : null;
+app.get('/ping', (_, res) => res.send('pong'));
+
+app.get('/health', (_, res) => {
+  const s = session;
+  const online = !!s && active(s);
+  const p = online ? s.bot.entity.position : null;
 
   res.json({
     name: config['bot-account'].username,
-    connected: !!live,
-    mode: live ? session.mode : 'offline',
-    position: p
-      ? {
-          x: +p.x.toFixed(1),
-          y: +p.y.toFixed(1),
-          z: +p.z.toFixed(1)
-        }
-      : null,
-    uptimeSeconds: Math.floor((now() - startedAt) / 1000),
-    reconnectAttempts,
-    lastKick: history.lastKick,
-    lastError: history.lastError
+    connected: online,
+    mode: online ? s.mode : 'offline',
+    coordinates: p ? { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) } : null,
+    distance: online ? Math.round(s.distance) : 0,
+    jumps: online ? s.jumps : 0,
+    expedition: online ? Math.round(s.progress) : 0,
+    reconnectAttempts: attempts,
+    uptime: Math.floor((Date.now() - started) / 1000),
+    lastKick: history.kick,
+    lastError: history.error
   });
 });
 
-app.get('/ping', (_req, res) => res.send('pong'));
-
-app.get('/', (_req, res) => {
-  res.send(`
-<!doctype html>
+app.get('/', (_, res) => {
+  res.send(`<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Aevoris</title>
 <style>
-body {
-  background:#090b10;
-  color:#e5e7eb;
-  font:16px Arial;
-  min-height:95vh;
-  display:grid;
-  place-items:center;
-}
-main {
-  border:1px solid #3d4756;
-  border-radius:18px;
-  padding:28px;
-  max-width:430px;
-  width:82%;
-  box-shadow:0 0 55px #aab5d015;
-}
-h1 {
-  letter-spacing:5px;
-  color:#edf4ff;
-}
-p { color:#aab5c9; }
-b { color:#fff; }
+body{background:#080b13;color:#e9f0ff;font:16px Arial;min-height:95vh;display:grid;place-items:center}
+main{background:#182033;padding:30px;border-radius:20px;width:min(450px,85%);box-shadow:0 0 45px #b0c4de22}
+h1{letter-spacing:5px}p{color:#bdc9dc}b{color:#fff}
 </style>
 </head>
 <body>
 <main>
 <h1>AEVORIS</h1>
-<p>The Silent Wanderer</p>
-<p>Presence: <b id="status">...</b></p>
-<p>Behaviour: <b id="mode">...</b></p>
-<p>Location: <b id="xyz">...</b></p>
-<p>Reconnects: <b id="tries">...</b></p>
+<p>The Silent Explorer</p>
+<p>Status: <b id="status">Loading</b></p>
+<p>Behaviour: <b id="mode">Unknown</b></p>
+<p>Coordinates: <b id="pos">Unknown</b></p>
+<p>Distance travelled: <b id="distance">0</b></p>
+<p>Jumps: <b id="jumps">0</b></p>
 </main>
 <script>
-async function refresh() {
-  try {
-    const r = await fetch('/health');
-    const s = await r.json();
-    document.getElementById('status').textContent =
-      s.connected ? 'Manifested' : 'Absent';
-    document.getElementById('mode').textContent = s.mode;
-    document.getElementById('xyz').textContent =
-      s.position
-        ? Object.values(s.position).join(', ')
-        : 'Unknown';
-    document.getElementById('tries').textContent =
-      s.reconnectAttempts;
-  } catch (e) {
-    document.getElementById('status').textContent =
-      'Unknown';
-  }
+async function refresh(){
+ try{
+  const r=await fetch('/health');
+  const d=await r.json();
+  document.getElementById('status').textContent=d.connected?'Manifested':'Absent';
+  document.getElementById('mode').textContent=d.mode;
+  document.getElementById('pos').textContent=d.coordinates?Object.values(d.coordinates).join(', '):'Unknown';
+  document.getElementById('distance').textContent=d.distance+' blocks';
+  document.getElementById('jumps').textContent=d.jumps;
+ }catch(e){}
 }
-refresh();
-setInterval(refresh, 3000);
+refresh();setInterval(refresh,3000);
 </script>
 </body>
-</html>
-  `);
+</html>`);
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  announce(`Dashboard on port ${PORT}`);
-});
+const webServer = app.listen(PORT, '0.0.0.0', () => log(`Dashboard: ${PORT}`));
 
-// Optional web monitoring.
-// This cannot keep an Aternos server running.
-
-if (process.env.MONITOR_PING_URL) {
-  setInterval(() => {
-    try {
-      const uri = new URL(process.env.MONITOR_PING_URL);
-      const client =
-        uri.protocol === 'https:' ? https : http;
-
-      const request = client.get(
-        uri,
-        response => response.resume()
-      );
-
-      request.setTimeout(8000, () => request.destroy());
-
-      request.on('error', error => {
-        announce(`Monitoring ping: ${error.message}`);
-      });
-    } catch (error) {
-      announce(`Monitoring ping: ${error.message}`);
-    }
-  }, 10 * 60 * 1000);
-}
-
-// ============================================================
 // DISCORD
-// ============================================================
-
-function sendDiscord(text, color = 0xb0c4de, event) {
-  const discord = config.discord || {};
-
-  if (
-    !discord.enabled ||
-    (event && discord.events?.[event] === false)
-  ) return;
-
-  const urlText =
-    process.env.DISCORD_WEBHOOK_URL ||
-    discord.webhookUrl;
-
-  if (
-    !urlText ||
-    urlText.includes('YOUR_DISCORD')
-  ) return;
+function notify(message, event, color = 0xb0c4de) {
+  if (!config.discord?.enabled || config.discord.events?.[event] === false) return;
+  const webhook = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhook) return;
 
   try {
-    const uri = new URL(urlText);
-
-    if (uri.protocol !== 'https:') return;
-
+    const url = new URL(webhook);
+    if (url.protocol !== 'https:') return;
     const body = JSON.stringify({
       username: 'Aevoris',
-      embeds: [{
-        description: text,
-        color,
-        timestamp: new Date().toISOString()
-      }]
+      embeds: [{ description: message, color, timestamp: new Date().toISOString() }]
     });
-
     const req = https.request({
-      hostname: uri.hostname,
-      port: uri.port || 443,
-      path: uri.pathname + uri.search,
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: url.pathname + url.search,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body)
       }
-    }, response => response.resume());
-
-    req.on('error', err => {
-      announce(`Discord: ${err.message}`);
-    });
-
+    }, res => res.resume());
+    req.on('error', e => log(`Discord: ${e.message}`));
     req.end(body);
-
-  } catch (err) {
-    announce(`Discord: ${err.message}`);
+  } catch (e) {
+    log(`Discord: ${e.message}`);
   }
 }
 
-// ============================================================
-// SESSION MANAGEMENT
-// ============================================================
-
-function isCurrent(s) {
-  return session === s && !s.closed && !closing;
+// SESSION UTILITIES
+function active(s) {
+  return session === s && !s.closed && s.spawned && !!s.bot.entity && !shuttingDown;
 }
 
-function isLive(s) {
-  return (
-    isCurrent(s) &&
-    s.spawned &&
-    !!s.bot.entity
-  );
-}
-
-function every(s, ms, fn) {
+function interval(s, ms, fn) {
   const id = setInterval(() => {
-    if (!isLive(s)) return;
-
+    if (!active(s)) return;
     try {
-      Promise.resolve(fn()).catch(err => {
-        announce(`Module: ${err.message}`);
-      });
-    } catch (err) {
-      announce(`Module: ${err.message}`);
+      Promise.resolve(fn()).catch(e => log(`Module: ${e.message}`));
+    } catch (e) {
+      log(`Module: ${e.message}`);
     }
   }, ms);
-
   s.intervals.add(id);
-  return id;
 }
 
-function later(s, ms, fn) {
+function timeout(s, ms, fn) {
   const id = setTimeout(() => {
     s.timeouts.delete(id);
-
-    if (!isLive(s)) return;
-
+    if (!active(s)) return;
     try {
-      Promise.resolve(fn()).catch(err => {
-        announce(`Timer: ${err.message}`);
-      });
-    } catch (err) {
-      announce(`Timer: ${err.message}`);
+      Promise.resolve(fn()).catch(e => log(`Timer: ${e.message}`));
+    } catch (e) {
+      log(`Timer: ${e.message}`);
     }
   }, ms);
-
   s.timeouts.add(id);
-  return id;
 }
 
 function cleanup(s) {
   if (s.closed) return;
-
   s.closed = true;
-
-  for (const id of s.intervals) {
-    clearInterval(id);
-  }
-
-  for (const id of s.timeouts) {
-    clearTimeout(id);
-  }
-
+  clearTimeout(s.connectionTimer);
+  for (const id of s.intervals) clearInterval(id);
+  for (const id of s.timeouts) clearTimeout(id);
   s.intervals.clear();
   s.timeouts.clear();
-
-  if (s.connectTimer) {
-    clearTimeout(s.connectTimer);
-  }
-
-  try {
-    s.bot.pathfinder.setGoal(null);
-  } catch (_) {}
-
-  try {
-    s.bot.clearControlStates();
-  } catch (_) {}
+  try { s.bot.pathfinder.setGoal(null); } catch (_) {}
+  try { s.bot.clearControlStates(); } catch (_) {}
 }
 
-// ============================================================
-// AUTOMATIC RECONNECTION
-// ============================================================
-
+// RECONNECT
 function reconnect() {
-  if (
-    closing ||
-    !AUTO_RECONNECT ||
-    reconnectTimer
-  ) return;
-
-  reconnectAttempts++;
-
-  const base = Math.max(
-    2000,
-    Number(options['auto-reconnect-delay']) || 3000
-  );
-
-  const cap = Math.max(
-    base,
-    Number(options['max-reconnect-delay']) || 60000
-  );
-
-  const delay = Math.min(
-    cap,
-    base * 2 ** Math.min(6, reconnectAttempts - 1)
-  );
-
-  announce(
-    `Reconnect in ${Math.round(delay / 1000)}s ` +
-    `(#${reconnectAttempts})`
-  );
-
+  if (shuttingDown || utils['auto-reconnect'] === false || reconnectTimer) return;
+  attempts++;
+  const base = Math.max(2000, Number(utils['auto-reconnect-delay']) || 3000);
+  const maximum = Math.max(base, Number(utils['max-reconnect-delay']) || 60000);
+  const delay = Math.min(maximum, base * Math.pow(2, Math.min(attempts - 1, 6)));
+  log(`Reconnecting in ${delay / 1000}s (#${attempts})`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
   }, delay);
 }
 
-function finish(s, reason, deliberate = false) {
+function disconnect(s, reason, retry = true) {
   if (s.closed) return;
-
-  announce(`Disconnected: ${reason}`);
-
-  const wasSpawned = s.spawned;
-
+  const wasOnline = s.spawned;
+  log(`Disconnected: ${reason}`);
   cleanup(s);
-
   if (session === s) {
     session = null;
-
-    if (wasSpawned) {
-      sendDiscord(
-        `Aevoris vanished: ${reason}`,
-        0xd77b83,
-        'disconnect'
-      );
-    }
-
-    if (!deliberate) reconnect();
+    if (wasOnline) notify(`Aevoris vanished: ${reason}`, 'disconnect', 0xe48c9b);
+    if (retry) reconnect();
   }
 }
 
-function chatCommand(s, text) {
-  if (!isLive(s)) return;
+// TERRAIN SCANNING
+const hazards = /lava|fire|magma|cactus|campfire|sweet_berry|cobweb/;
 
-  try {
-    s.bot.chat(text);
-  } catch (err) {
-    announce(`Command failed: ${err.message}`);
-  }
-}
-
-// ============================================================
-// TERRAIN SAFETY SCANNER
-// ============================================================
-
-const hazardous =
-  /lava|fire|magma|cactus|sweet_berry|campfire|powder_snow/;
-
-function footSafe(bot, x, y, z) {
-  const here = bot.blockAt(new Vec3(x, y, z));
-  const head = bot.blockAt(new Vec3(x, y + 1, z));
-  const floor = bot.blockAt(new Vec3(x, y - 1, z));
-
-  if (!here || !head || !floor) return false;
-
-  if (
-    here.boundingBox !== 'empty' ||
-    head.boundingBox !== 'empty'
-  ) return false;
-
-  if (
-    floor.boundingBox !== 'block' ||
-    hazardous.test(floor.name)
-  ) return false;
-
-  if (
-    hazardous.test(here.name) ||
-    hazardous.test(head.name)
-  ) return false;
-
-  if (
-    here.name.includes('water') ||
-    head.name.includes('water')
-  ) return false;
-
-  for (const [dx, dz] of [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1]
-  ]) {
-    const beside = bot.blockAt(
-      new Vec3(x + dx, y, z + dz)
-    );
-
-    if (
-      beside &&
-      hazardous.test(beside.name)
-    ) return false;
-  }
-
-  return true;
-}
-
-function findFoot(bot, x, z, suggestedY) {
+function safeGround(bot, x, z, approximateY) {
   x = Math.floor(x);
   z = Math.floor(z);
+  for (const offset of [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5]) {
+    const y = Math.floor(approximateY) + offset;
+    const feet = bot.blockAt(new Vec3(x, y, z));
+    const head = bot.blockAt(new Vec3(x, y + 1, z));
+    const floor = bot.blockAt(new Vec3(x, y - 1, z));
+    if (!feet || !head || !floor) continue;
+    if (feet.boundingBox !== 'empty' || head.boundingBox !== 'empty') continue;
+    if (floor.boundingBox !== 'block') continue;
+    if (hazards.test(feet.name) || hazards.test(head.name) || hazards.test(floor.name)) continue;
+    if (/water/.test(feet.name) || /water/.test(head.name)) continue;
+    return { x, y, z };
+  }
+  return null;
+}
 
-  const y0 = Math.floor(suggestedY);
+// HOSTILE MOB DETECTION
+function findThreat(s) {
+  if (!modules.avoidMobs) return null;
+  const hostile = new Set([
+    'zombie', 'skeleton', 'creeper', 'spider', 'drowned',
+    'husk', 'stray', 'witch', 'phantom', 'pillager', 'slime'
+  ]);
+  const p = s.bot.entity.position;
+  return Object.values(s.bot.entities)
+    .filter(e => e && e.position && hostile.has(e.name) && p.distanceTo(e.position) < 9)
+    .sort((a, b) => p.distanceTo(a.position) - p.distanceTo(b.position))[0] || null;
+}
 
-  for (const dy of [
-    0, 1, -1, 2, -2, 3, -3, 4, -4
-  ]) {
-    const y = y0 + dy;
+// EXPEDITION PLANNING
+function newHeading(s, major = false) {
+  s.heading += (Math.random() < 0.5 ? -1 : 1) *
+    (major ? 2 + Math.random() * 2 : 0.2 + Math.random() * 0.6);
+  s.progress = 0;
+  s.failures = 0;
+  s.mode = 'choosing direction';
+}
 
-    if (footSafe(bot, x, y, z)) {
-      return { x, y, z };
+function chooseWaypoint(s, threat = null) {
+  const p = s.bot.entity.position;
+
+  for (let i = 0; i < 48; i++) {
+    let angle = s.heading + (Math.random() - 0.5) * (i < 24 ? 1 : 2.8);
+    if (threat) {
+      angle = Math.atan2(p.z - threat.position.z, p.x - threat.position.x) +
+        (Math.random() - 0.5) * 0.8;
     }
+
+    const radius = Math.max(6, WAYPOINT - Math.floor(i / 12) * 4);
+    const target = safeGround(
+      s.bot,
+      p.x + Math.cos(angle) * radius,
+      p.z + Math.sin(angle) * radius,
+      p.y
+    );
+
+    if (!target) continue;
+
+    const key = `${target.x},${target.y},${target.z}`;
+    if (s.blocked.get(key) > Date.now()) continue;
+
+    if (threat && Math.hypot(target.x - threat.position.x, target.z - threat.position.z) < 9) continue;
+
+    if (s.visited.some(v => Math.hypot(target.x - v.x, target.z - v.z) < 5)) continue;
+
+    return target;
   }
 
   return null;
 }
 
-// ============================================================
-// MOB DETECTION
-// ============================================================
-
-function nearbyThreat(s) {
-  if (!features.avoidMobs) return null;
-
-  const p = s.bot.entity.position;
-
-  const dangerous = new Set([
-    'zombie',
-    'skeleton',
-    'spider',
-    'creeper',
-    'drowned',
-    'husk',
-    'stray',
-    'witch',
-    'enderman',
-    'phantom',
-    'pillager'
-  ]);
-
-  return Object.values(s.bot.entities)
-    .filter(e =>
-      e &&
-      e.position &&
-      dangerous.has(e.name) &&
-      p.distanceTo(e.position) < 9
-    )
-    .sort((a, b) =>
-      p.distanceTo(a.position) -
-      p.distanceTo(b.position)
-    )[0] || null;
-}
-
-// ============================================================
-// SMART DESTINATION SYSTEM
-// ============================================================
-
-function setDestination(s, dest, mode) {
-  if (!isLive(s) || !dest) return false;
-
+function setGoal(s, target, mode = 'exploring') {
+  if (!active(s) || !target) return false;
   try {
-    s.bot.pathfinder.setGoal(
-      new GoalNear(
-        dest.x,
-        dest.y,
-        dest.z,
-        1
-      )
-    );
-
-    s.goal = dest;
-    s.mode = mode;
-    s.lastProgress = now();
-    s.lastPosition =
-      s.bot.entity.position.clone();
-    s.goalSince = now();
-
     s.bot.setControlState('sneak', false);
-
+    s.bot.pathfinder.setGoal(new GoalNear(target.x, target.y, target.z, 2));
+    s.goal = target;
+    s.goalStart = Date.now();
+    s.lastProgress = Date.now();
+    s.progressPosition = s.bot.entity.position.clone();
+    s.mode = mode;
     return true;
-
-  } catch (err) {
-    announce(`Path planning: ${err.message}`);
+  } catch (e) {
+    log(`Navigation: ${e.message}`);
     return false;
   }
 }
 
-function abandon(s, why) {
-  if (!isLive(s)) return;
-
-  const old = s.goal;
-
+function abandon(s, reason) {
+  if (!active(s) || !s.goal) return;
+  const g = s.goal;
+  s.blocked.set(`${g.x},${g.y},${g.z}`, Date.now() + 120000);
   s.goal = null;
-  s.mode = 'searching';
-  s.pauseUntil = now() + rand(1500, 3500);
-
-  try {
-    s.bot.pathfinder.setGoal(null);
-  } catch (_) {}
-
-  try {
-    s.bot.clearControlStates();
-  } catch (_) {}
-
-  if (old) {
-    s.badSpots.set(
-      `${old.x},${old.y},${old.z}`,
-      now() + 120000
-    );
-  }
-
-  announce(`Finding another route (${why})`);
+  s.failures++;
+  try { s.bot.pathfinder.setGoal(null); } catch (_) {}
+  try { s.bot.clearControlStates(); } catch (_) {}
+  if (s.failures >= 3) newHeading(s, true);
+  s.mode = 'rerouting';
+  s.pauseUntil = Date.now() + rand(1000, 2400);
+  log(`Finding another route: ${reason}`);
 }
 
-function chooseDestination(s, threat = null) {
-  const b = s.bot;
-  const p = b.entity.position;
-
-  const landmark =
-    config.position?.enabled
-      ? config.position
-      : null;
-
-  const useLandmark =
-    landmark &&
-    Math.hypot(
-      p.x - landmark.x,
-      p.z - landmark.z
-    ) < 26 &&
-    Math.abs(p.y - landmark.y) < 7 &&
-    Math.random() < 0.10;
-
-  for (let attempt = 0; attempt < 45; attempt++) {
-    let x, z;
-
-    if (useLandmark && attempt < 12) {
-      x = landmark.x + rand(-7, 7);
-      z = landmark.z + rand(-7, 7);
-
-    } else if (threat) {
-      const away =
-        Math.atan2(
-          p.z - threat.position.z,
-          p.x - threat.position.x
-        ) +
-        (Math.random() - 0.5);
-
-      const r = rand(8, 14);
-
-      x = p.x + Math.cos(away) * r;
-      z = p.z + Math.sin(away) * r;
-
-    } else {
-      const angle =
-        Math.random() * Math.PI * 2;
-
-      const r = rand(6, MAX_RADIUS);
-
-      x = p.x + Math.cos(angle) * r;
-      z = p.z + Math.sin(angle) * r;
-    }
-
-    const candidate =
-      findFoot(b, x, z, p.y);
-
-    if (!candidate) continue;
-
-    if (
-      s.badSpots.get(
-        `${candidate.x},${candidate.y},${candidate.z}`
-      ) > now()
-    ) continue;
-
-    if (
-      threat &&
-      Math.hypot(
-        candidate.x - threat.position.x,
-        candidate.z - threat.position.z
-      ) < 9
-    ) continue;
-
-    return candidate;
-  }
-
-  return null;
-}
-
-// ============================================================
-// SILENT PLAYER OBSERVATION
-// ============================================================
-
-function watchSomeone(s) {
-  if (!isLive(s)) return false;
-
+// LORE: SILENTLY WATCH PLAYERS
+function observePlayer(s) {
   const p = s.bot.entity.position;
-
-  const strangers = Object.values(s.bot.players)
+  const players = Object.values(s.bot.players)
     .map(player => player.entity)
-    .filter(e =>
-      e &&
-      e.id !== s.bot.entity.id &&
-      e.position &&
-      p.distanceTo(e.position) < 14
-    );
+    .filter(e => e && e.position && e.id !== s.bot.entity.id && p.distanceTo(e.position) < 13);
 
-  if (
-    !strangers.length ||
-    Math.random() > 0.32
-  ) return false;
+  if (!players.length || Math.random() > 0.22) return false;
 
-  const target =
-    strangers[rand(0, strangers.length - 1)];
-
-  s.mode = 'watching';
-  s.pauseUntil =
-    now() + rand(3500, 8000);
+  const target = players[rand(0, players.length - 1)];
+  s.mode = 'watching silently';
+  s.pauseUntil = Date.now() + rand(3000, 8000);
 
   try {
-    s.bot.pathfinder.setGoal(null);
+    Promise.resolve(s.bot.lookAt(target.position.offset(0, 1.5, 0), true)).catch(() => {});
   } catch (_) {}
-
-  s.goal = null;
-
-  try {
-    Promise.resolve(
-      s.bot.lookAt(
-        target.position.offset(0, 1.45, 0),
-        true
-      )
-    ).catch(() => {});
-  } catch (_) {}
-
   return true;
 }
 
-// ============================================================
-// INTELLIGENT WANDERING BRAIN
-// ============================================================
-
-function startBrain(s) {
+// INTELLIGENT EXPLORATION
+function startExplorer(s) {
   const b = s.bot;
-
-  const mcData =
-    require('minecraft-data')(config.server.version);
-
-  const moves =
-    new Movements(b, mcData);
+  const mcData = require('minecraft-data')(config.server.version);
+  const moves = new Movements(b, mcData);
 
   moves.canDig = false;
   moves.allow1by1towers = false;
   moves.allowParkour = false;
   moves.maxDropDown = 1;
-  moves.infiniteLiquidDropdownDistance = false;
-  moves.allowFreeMotion = false;
+  moves.liquidCost = 50;
+  moves.canOpenDoors = false;
   moves.allowSprinting = true;
-  moves.liquidCost = 25;
 
   b.pathfinder.setMovements(moves);
-
-  b.pathfinder.thinkTimeout = 4000;
+  b.pathfinder.thinkTimeout = 4500;
   b.pathfinder.tickTimeout = 30;
 
   b.on('goal_reached', () => {
-    if (!isLive(s) || !s.goal) return;
-
+    if (!active(s) || !s.goal) return;
+    const target = s.goal;
+    s.progress += Math.hypot(
+      target.x - s.goalOrigin.x,
+      target.z - s.goalOrigin.z
+    );
+    s.visited.push(target);
+    if (s.visited.length > 8) s.visited.shift();
     s.goal = null;
+    s.failures = 0;
     s.mode = 'observing';
+    s.pauseUntil = Date.now() + rand(400, 3000);
 
-    s.pauseUntil =
-      now() + rand(3000, 13000);
+    if (s.progress >= EXPEDITION) newHeading(s, true);
+    else if (Math.random() < 0.15) s.heading += (Math.random() - 0.5) * 0.7;
   });
 
   b.on('path_update', result => {
-    if (!isLive(s) || !s.goal) return;
-
-    if (
-      result.status === 'noPath' ||
-      result.status === 'timeout'
-    ) {
-      abandon(s, result.status);
-    }
+    if (active(s) && s.goal && result.status === 'noPath') abandon(s, 'no path');
   });
 
-  every(s, 1400, () => {
-    if (b.isSleeping || !b.entity) return;
-    if (s.busy) return;
+  b.on('path_reset', reason => {
+    if (active(s) && s.goal && reason === 'stuck') abandon(s, 'stuck');
+  });
 
-    const threat = nearbyThreat(s);
+  // Main exploration brain
+  interval(s, 1400, () => {
+    if (s.busy || b.isSleeping) return;
 
-    if (
-      threat &&
-      s.mode !== 'fleeing'
-    ) {
-      const escape =
-        chooseDestination(s, threat);
+    const threat = findThreat(s);
 
+    if (threat && s.mode !== 'fleeing') {
+      const escape = chooseWaypoint(s, threat);
       if (escape) {
-        setDestination(
-          s,
-          escape,
-          'fleeing'
-        );
+        s.goalOrigin = b.entity.position.clone();
+        setGoal(s, escape, 'fleeing');
       }
     }
 
     if (s.goal) return;
 
-    if (now() < s.pauseUntil) {
-      b.setControlState(
-        'sneak',
-        !!options['anti-afk']?.sneak
-      );
+    if (Date.now() < s.pauseUntil) {
+      b.setControlState('sneak', !!utils['anti-afk']?.sneak);
       return;
     }
 
     b.setControlState('sneak', false);
 
-    if (watchSomeone(s)) return;
+    if (observePlayer(s)) return;
 
-    const dest =
-      chooseDestination(s, threat);
+    const target = chooseWaypoint(s, threat);
 
-    if (!dest) {
-      s.mode = 'searching';
-      s.pauseUntil = now() + 4500;
-      return;
-    }
-
-    setDestination(
-      s,
-      dest,
-      threat ? 'fleeing' : 'wandering'
-    );
-  });
-
-  // Stuck detection
-
-  every(s, 2500, () => {
-    if (
-      !s.goal ||
-      !b.entity ||
-      b.isSleeping
-    ) return;
-
-    if (
-      b.entity.position.distanceTo(
-        s.lastPosition
-      ) >= 1.1
-    ) {
-      s.lastPosition =
-        b.entity.position.clone();
-
-      s.lastProgress = now();
-    }
-
-    if (
-      now() - s.lastProgress > 12000 ||
-      now() - s.goalSince > 50000
-    ) {
-      abandon(
-        s,
-        'stuck or unreachable'
-      );
-    }
-
-    for (const [key, expiry] of s.badSpots) {
-      if (expiry < now()) {
-        s.badSpots.delete(key);
-      }
+    if (target) {
+      s.goalOrigin = b.entity.position.clone();
+      setGoal(s, target, threat ? 'fleeing' : 'exploring far away');
+    } else {
+      newHeading(s, true);
+      s.pauseUntil = Date.now() + 2000;
     }
   });
 
-  // Look around while idle
+  // Travel distance tracking
+  interval(s, 1000, () => {
+    const p = b.entity.position;
+    if (s.previousPosition) {
+      const distance = p.distanceTo(s.previousPosition);
+      if (distance < 9) s.distance += distance;
+    }
+    s.previousPosition = p.clone();
+  });
 
-  if (movement['look-around']?.enabled) {
-    every(
-      s,
-      Math.max(
-        3000,
-        Number(
-          movement['look-around'].interval
-        ) || 5000
-      ),
-      () => {
-        if (
-          s.goal ||
-          s.mode === 'watching' ||
-          b.isSleeping
-        ) return;
+  // Stuck detection and jumping recovery
+  interval(s, 2400, () => {
+    if (!s.goal || s.busy || b.isSleeping) return;
 
-        try {
-          Promise.resolve(
-            b.look(
-              Math.random() * Math.PI * 2,
-              (Math.random() - 0.5) * 0.35,
-              true
-            )
-          ).catch(() => {});
-        } catch (_) {}
-      }
-    );
+    const p = b.entity.position;
+
+    if (p.distanceTo(s.progressPosition) >= 1.1) {
+      s.progressPosition = p.clone();
+      s.lastProgress = Date.now();
+    }
+
+    if (Date.now() - s.lastProgress > 8500 ||
+        Date.now() - s.goalStart > 65000) {
+      abandon(s, 'movement timeout');
+    }
+
+    for (const [key, expiry] of s.blocked) {
+      if (expiry < Date.now()) s.blocked.delete(key);
+    }
+  });
+
+  // Natural random jumping
+  if (movement['random-jump']?.enabled) {
+    interval(s, Math.max(9000, Number(movement['random-jump'].interval) || 10000), () => {
+      if (s.goal || s.busy || b.isSleeping || !b.entity.onGround || Math.random() > 0.35) return;
+      b.setControlState('jump', true);
+      s.jumps++;
+      timeout(s, 250, () => b.setControlState('jump', false));
+    });
   }
 
-  // Occasional idle jumping
-
-  if (
-    movement['random-jump']?.enabled &&
-    options['anti-afk']?.enabled
-  ) {
-    every(
-      s,
-      Math.max(
-        9000,
-        Number(
-          movement['random-jump'].interval
-        ) || 12000
-      ),
-      () => {
-        if (
-          s.goal ||
-          s.mode === 'watching' ||
-          !b.entity.onGround ||
-          b.isSleeping ||
-          Math.random() > 0.22
-        ) return;
-
-        b.setControlState('jump', true);
-
-        later(s, 230, () => {
-          b.setControlState(
-            'jump',
-            false
-          );
-        });
-      }
-    );
+  // Look around
+  if (movement['look-around']?.enabled) {
+    interval(s, Math.max(3000, Number(movement['look-around'].interval) || 5000), () => {
+      if (s.goal || s.busy || s.mode === 'watching silently') return;
+      Promise.resolve(b.look(Math.random() * Math.PI * 2, (Math.random() - 0.5) * 0.35, true))
+        .catch(() => {});
+    });
   }
 }
 
-// ============================================================
-// SURVIVAL, COMBAT AND BEDS
-// ============================================================
-
+// SURVIVAL: AUTO EAT, COMBAT, BEDS
 function startSurvival(s) {
   const b = s.bot;
-  const mcData =
-    require('minecraft-data')(config.server.version);
+  const mcData = require('minecraft-data')(config.server.version);
 
-  // Auto-eat
-
-  if (
-    features.combat &&
-    combat['auto-eat']
-  ) {
-    every(s, 6000, async () => {
-      if (
-        s.busy ||
-        b.isSleeping ||
-        b.food === undefined ||
-        b.food >= 14
-      ) return;
-
-      const food =
-        b.inventory.items().find(item => {
-          const data =
-            mcData.itemsByName[item.name];
-
-          return data &&
-            (
-              data.foodPoints > 0 ||
-              data.food
-            );
-        });
-
+  if (modules.combat && combat['auto-eat']) {
+    interval(s, 6000, async () => {
+      if (s.busy || b.isSleeping || b.food === undefined || b.food >= 14) return;
+      const food = b.inventory.items().find(i => {
+        const data = mcData.itemsByName[i.name];
+        return data && (data.foodPoints > 0 || data.food);
+      });
       if (!food) return;
 
       s.busy = true;
-
       try {
+        b.pathfinder.setGoal(null);
+        s.goal = null;
         await b.equip(food, 'hand');
-
-        if (isLive(s)) {
-          await b.consume();
-        }
-
-      } catch (err) {
-        announce(`Eating: ${err.message}`);
+        if (active(s)) await b.consume();
+      } catch (e) {
+        log(`Eating: ${e.message}`);
       } finally {
         s.busy = false;
       }
     });
   }
 
-  // Optional safe combat
-
   if (ATTACK) {
-    const allowed = new Set([
-      'zombie',
-      'skeleton',
-      'spider',
-      'drowned',
-      'husk',
-      'stray'
-    ]);
-
+    const allowed = new Set(['zombie', 'skeleton', 'spider', 'drowned', 'husk', 'stray']);
     let lastAttack = 0;
-
-    every(s, 2000, () => {
-      if (
-        s.busy ||
-        now() - lastAttack < 2000
-      ) return;
-
-      const target =
-        Object.values(b.entities).find(e =>
-          e &&
-          e.type === 'mob' &&
-          allowed.has(e.name) &&
-          e.position &&
-          b.entities[e.id] === e &&
-          e.id !== b.entity.id &&
-          b.entity.position.distanceTo(
-            e.position
-          ) < 3
-        );
-
+    interval(s, 2200, () => {
+      if (s.busy || Date.now() - lastAttack < 2000) return;
+      const target = Object.values(b.entities).find(e =>
+        e && e.type === 'mob' && allowed.has(e.name) &&
+        e.position && e.id !== b.entity.id &&
+        b.entities[e.id] === e &&
+        b.entity.position.distanceTo(e.position) < 2.8
+      );
       if (!target) return;
-
       try {
         b.attack(target);
-        lastAttack = now();
-      } catch (err) {
-        announce(`Combat: ${err.message}`);
+        lastAttack = Date.now();
+      } catch (e) {
+        log(`Combat: ${e.message}`);
       }
     });
   }
 
-  // Nighttime beds and daytime recovery
+  if (modules.beds && (beds['place-night'] || beds['pick-up-day'])) {
+    let lastSleepAttempt = 0;
 
-  if (
-    features.beds &&
-    (
-      sleeping['place-night'] ||
-      sleeping['pick-up-day']
-    )
-  ) {
-    let lastAttempt = 0;
-
-    every(s, 10000, async () => {
-      if (
-        s.busy ||
-        !b.time ||
-        !b.entity
-      ) return;
-
+    interval(s, 13000, async () => {
+      if (s.busy || !b.time || !b.entity) return;
       const time = b.time.timeOfDay;
-      const night =
-        time >= 12500 &&
-        time <= 23500;
+      const night = time >= 12500 && time <= 23500;
 
-      // Recover only beds placed by Aevoris.
-
-      if (
-        !night &&
-        sleeping['pick-up-day'] &&
-        s.placedBed
-      ) {
-        const p = s.placedBed;
-        const block = b.blockAt(p);
-
-        if (
-          !block ||
-          !block.name.endsWith('_bed')
-        ) {
+      if (!night && beds['pick-up-day'] && s.placedBed) {
+        const block = b.blockAt(s.placedBed);
+        if (!block || !block.name.endsWith('_bed')) {
           s.placedBed = null;
           return;
         }
-
-        if (
-          b.entity.position.distanceTo(p) > 4.5
-        ) return;
+        if (b.entity.position.distanceTo(s.placedBed) > 4) return;
 
         s.busy = true;
-
         try {
           b.pathfinder.setGoal(null);
           s.goal = null;
-
           await b.dig(block);
-
           s.placedBed = null;
-
-        } catch (err) {
-          announce(
-            `Bed pickup: ${err.message}`
-          );
+        } catch (e) {
+          log(`Bed pickup: ${e.message}`);
         } finally {
           s.busy = false;
         }
-
         return;
       }
 
-      if (
-        !night ||
-        !sleeping['place-night'] ||
-        b.isSleeping ||
-        now() - lastAttempt < 45000
-      ) return;
+      if (!night || !beds['place-night'] || b.isSleeping ||
+          Date.now() - lastSleepAttempt < 60000) return;
 
-      lastAttempt = now();
+      lastSleepAttempt = Date.now();
       s.busy = true;
 
       try {
@@ -1072,449 +547,271 @@ function startSurvival(s) {
         s.goal = null;
 
         let bed = b.findBlock({
-          matching: block =>
-            block.name.endsWith('_bed'),
-          maxDistance: 5
+          matching: block => block.name.endsWith('_bed'),
+          maxDistance: 4
         });
 
         if (!bed) {
-          const bedItem =
-            b.inventory.items().find(i =>
-              i.name.endsWith('_bed')
-            );
-
-          if (bedItem) {
-            const pos = b.entity.position;
-
-            for (const [dx, dz] of [
-              [1, 0],
-              [-1, 0],
-              [0, 1],
-              [0, -1]
-            ]) {
-              const spot = findFoot(
+          const item = b.inventory.items().find(i => i.name.endsWith('_bed'));
+          if (item) {
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              const spot = safeGround(
                 b,
-                pos.x + dx,
-                pos.z + dz,
-                pos.y
+                b.entity.position.x + dx,
+                b.entity.position.z + dz,
+                b.entity.position.y
               );
-
               if (!spot) continue;
 
-              if (
-                b.entity.position.distanceTo(
-                  new Vec3(
-                    spot.x,
-                    spot.y,
-                    spot.z
-                  )
-                ) > 4.4
-              ) continue;
-
-              const floor = b.blockAt(
-                new Vec3(
-                  spot.x,
-                  spot.y - 1,
-                  spot.z
-                )
-              );
-
-              if (!floor) continue;
+              const floor = b.blockAt(new Vec3(spot.x, spot.y - 1, spot.z));
+              if (!floor || b.entity.position.distanceTo(
+                new Vec3(spot.x, spot.y, spot.z)
+              ) > 4) continue;
 
               try {
-                await b.equip(
-                  bedItem,
-                  'hand'
-                );
-
-                await b.placeBlock(
-                  floor,
-                  new Vec3(0, 1, 0)
-                );
-
-                bed = b.blockAt(
-                  new Vec3(
-                    spot.x,
-                    spot.y,
-                    spot.z
-                  )
-                );
-
-                if (
-                  bed &&
-                  bed.name.endsWith('_bed')
-                ) {
-                  s.placedBed =
-                    bed.position.clone();
+                await b.equip(item, 'hand');
+                await b.placeBlock(floor, new Vec3(0, 1, 0));
+                const placed = b.blockAt(new Vec3(spot.x, spot.y, spot.z));
+                if (placed && placed.name.endsWith('_bed')) {
+                  bed = placed;
+                  s.placedBed = placed.position.clone();
+                  break;
                 }
-
-                break;
               } catch (_) {}
             }
           }
         }
 
-        if (
-          isLive(s) &&
-          bed &&
-          bed.name.endsWith('_bed')
-        ) {
+        if (active(s) && bed) {
           try {
             await b.sleep(bed);
             s.mode = 'sleeping';
           } catch (_) {}
         }
-
-      } catch (err) {
-        announce(`Bed: ${err.message}`);
+      } catch (e) {
+        log(`Bed: ${e.message}`);
       } finally {
         s.busy = false;
       }
     });
+
+    b.on('wake', () => {
+      if (active(s)) {
+        s.mode = 'observing';
+        s.pauseUntil = Date.now() + 2000;
+      }
+    });
   }
 
-  b.on('wake', () => {
-    if (isLive(s)) {
-      s.mode = 'observing';
-      s.pauseUntil = now() + 3000;
-    }
-  });
-
-  // Read chat, never automatically reply.
-
-  if (
-    features.chat &&
-    options['chat-log']
-  ) {
+  if (modules.chat && utils['chat-log']) {
     b.on('messagestr', message => {
-      if (isCurrent(s)) {
-        announce(
-          `[Server chat] ${String(message)}`
-        );
-      }
+      if (session === s && !s.closed) log(`[Chat] ${message}`);
     });
   }
 }
 
-// ============================================================
-// CONNECTION
-// ============================================================
-
+// CONNECT
 function connect() {
-  if (closing || session) return;
+  if (shuttingDown || session) return;
 
-  announce(
-    `Connecting ${config.server.ip}:` +
-    `${config.server.port} as ` +
-    config['bot-account'].username
-  );
+  log(`Connecting to ${config.server.ip}:${config.server.port}`);
 
-  let b;
-
+  let bot;
   try {
-    b = mineflayer.createBot({
-      username:
-        config['bot-account'].username,
-      password:
-        config['bot-account'].password ||
-        undefined,
-      auth:
-        config['bot-account'].type ||
-        'offline',
+    bot = mineflayer.createBot({
+      username: config['bot-account'].username,
+      password: config['bot-account'].password || undefined,
+      auth: config['bot-account'].type || 'offline',
       host: config.server.ip,
       port: Number(config.server.port),
       version: config.server.version,
       hideErrors: true,
       checkTimeoutInterval: 120000
     });
-  } catch (err) {
-    history.lastError = err.message;
-
-    announce(
-      `Creation failed: ${err.message}`
-    );
-
+  } catch (e) {
+    history.error = e.message;
     reconnect();
     return;
   }
 
   const s = {
-    bot: b,
-    spawned: false,
-    closed: false,
+    bot,
     intervals: new Set(),
     timeouts: new Set(),
-    connectTimer: null,
+    connectionTimer: null,
+    closed: false,
+    spawned: false,
     busy: false,
-    goal: null,
     mode: 'connecting',
-    pauseUntil: 0,
-    goalSince: 0,
+    goal: null,
+    goalOrigin: null,
+    goalStart: 0,
     lastProgress: 0,
-    lastPosition: null,
-    badSpots: new Map(),
+    progressPosition: null,
+    pauseUntil: 0,
+    heading: Math.random() * Math.PI * 2,
+    progress: 0,
+    distance: 0,
+    jumps: 0,
+    failures: 0,
+    blocked: new Map(),
+    visited: [],
+    previousPosition: null,
     placedBed: null
   };
 
   session = s;
 
   try {
-    b.loadPlugin(pathfinder);
-  } catch (err) {
-    history.lastError = err.message;
-
-    finish(s, err.message);
-
-    try {
-      b.end();
-    } catch (_) {}
-
+    bot.loadPlugin(pathfinder);
+  } catch (e) {
+    disconnect(s, e.message);
+    try { bot.end(); } catch (_) {}
     return;
   }
 
-  // Authentication only — no normal chat messages.
-
-  let authenticated = false;
-
-  b.on('messagestr', message => {
-    if (
-      !isCurrent(s) ||
-      !options['auto-auth']?.enabled ||
-      !AUTH_PASSWORD ||
-      authenticated
-    ) return;
-
-    const msg =
-      String(message).toLowerCase();
-
-    let command = null;
-
-    if (msg.includes('/register')) {
-      command =
-        `/register ${AUTH_PASSWORD} ` +
-        AUTH_PASSWORD;
-    } else if (msg.includes('/login')) {
-      command =
-        `/login ${AUTH_PASSWORD}`;
-    }
-
-    if (command) {
-      authenticated = true;
-
-      try {
-        b.chat(command);
-
-        announce(
-          'Authentication command sent'
-        );
-      } catch (err) {
-        authenticated = false;
-
-        announce(
-          `Authentication: ${err.message}`
-        );
-      }
+  // Only login/register messages, never ordinary chat.
+  let authSent = false;
+  bot.on('messagestr', message => {
+    if (!AUTO_AUTH || !PASSWORD || authSent || session !== s || s.closed) return;
+    const text = String(message).toLowerCase();
+    let cmd = null;
+    if (text.includes('/register')) cmd = `/register ${PASSWORD} ${PASSWORD}`;
+    else if (text.includes('/login')) cmd = `/login ${PASSWORD}`;
+    if (!cmd) return;
+    authSent = true;
+    try {
+      bot.chat(cmd);
+      log('Authentication sent');
+    } catch (e) {
+      authSent = false;
+      log(`Authentication: ${e.message}`);
     }
   });
 
-  b.once('spawn', () => {
-    if (!isCurrent(s)) return;
+  bot.once('spawn', () => {
+    if (session !== s || s.closed) return;
 
+    clearTimeout(s.connectionTimer);
     s.spawned = true;
-
-    if (s.connectTimer) {
-      clearTimeout(s.connectTimer);
-    }
-
     s.mode = 'observing';
-    s.pauseUntil =
-      now() + rand(1500, 4500);
+    s.pauseUntil = Date.now() + rand(1500, 3500);
 
-    announce(
-      'Aevoris has manifested. ' +
-      'In-game speech disabled.'
-    );
+    log('Aevoris manifested. Silent long-range exploration enabled.');
+    notify('Aevoris appeared in the world.', 'connect');
 
-    sendDiscord(
-      'Aevoris appeared in the world.',
-      0xb0c4de,
-      'connect'
-    );
-
-    later(s, 120000, () => {
-      reconnectAttempts = 0;
-    });
+    timeout(s, 120000, () => { attempts = 0; });
 
     try {
-      if (movement.enabled !== false) {
-        startBrain(s);
-      }
-
+      if (movement.enabled !== false) startExplorer(s);
       startSurvival(s);
-
-    } catch (err) {
-      history.lastError = err.message;
-
-      announce(
-        `Module initialization: ${err.message}`
-      );
+    } catch (e) {
+      history.error = e.message;
+      log(`Initialization: ${e.message}`);
     }
   });
 
-  b.on('kicked', reason => {
-    if (!isCurrent(s)) return;
-
-    const text =
-      typeof reason === 'string'
-        ? reason
-        : JSON.stringify(reason);
-
-    history.lastKick = text;
-
-    announce(`Kicked: ${text}`);
+  bot.on('kicked', reason => {
+    if (session !== s || s.closed) return;
+    history.kick = typeof reason === 'string' ? reason : JSON.stringify(reason);
+    log(`Kicked: ${history.kick}`);
   });
 
-  b.on('error', err => {
-    if (!isCurrent(s)) return;
-
-    history.lastError = err.message;
-
-    announce(
-      `Network: ${err.code || err.message}`
-    );
+  bot.on('error', e => {
+    if (session !== s || s.closed) return;
+    history.error = e.message;
+    log(`Network: ${e.code || e.message}`);
   });
 
-  b.once('end', reason => {
-    finish(
-      s,
-      reason || 'socket closed'
-    );
+  bot.once('end', reason => {
+    disconnect(s, reason || 'socket closed');
   });
 
-  s.connectTimer = setTimeout(() => {
+  s.connectionTimer = setTimeout(() => {
     if (s.closed || s.spawned) return;
-
-    finish(s, 'spawn timeout');
-
-    try {
-      b.end();
-    } catch (_) {}
-
+    disconnect(s, 'connection timeout');
+    try { bot.end(); } catch (_) {}
   }, 60000);
 }
 
-// ============================================================
 // CONSOLE COMMANDS
-// ============================================================
-
 const cli = readline.createInterface({
   input: process.stdin,
   terminal: false
 });
 
 cli.on('line', line => {
-  const command = line.trim();
+  const text = line.trim();
   const s = session;
 
-  if (command === 'status') {
-    return announce(
-      s && isLive(s)
-        ? `ONLINE, ${s.mode}, ` +
-          s.bot.entity.position
-        : 'OFFLINE'
-    );
-  }
-
-  if (command === 'reconnect') {
-    if (s) {
-      finish(
-        s,
-        'console reconnect'
-      );
-
-      try {
-        s.bot.end();
-      } catch (_) {}
-    }
-
-    if (!reconnectTimer) {
-      reconnect();
-    }
-
+  if (text === 'status') {
+    log(s && active(s)
+      ? `${s.mode} | ${s.bot.entity.position} | ${Math.round(s.distance)} blocks`
+      : 'Offline');
     return;
   }
 
-  if (!s || !isLive(s)) {
-    return announce('Not connected');
+  if (text === 'reconnect') {
+    if (s) {
+      disconnect(s, 'manual reconnect');
+      try { s.bot.end(); } catch (_) {}
+    } else reconnect();
+    return;
   }
 
-  if (command.startsWith('say ')) {
-    chatCommand(
-      s,
-      command.slice(4)
-    );
+  if (!s || !active(s)) return;
 
-  } else if (command.startsWith('cmd ')) {
-    chatCommand(
-      s,
-      '/' + command.slice(4)
-    );
-
-  } else if (command === 'wander') {
-    abandon(s, 'console');
+  if (text === 'explore') {
+    newHeading(s, true);
+    if (s.goal) abandon(s, 'new expedition');
     s.pauseUntil = 0;
+  }
+
+  if (text === 'jump' && !s.goal && s.bot.entity.onGround) {
+    s.bot.setControlState('jump', true);
+    s.jumps++;
+    timeout(s, 250, () => s.bot.setControlState('jump', false));
+  }
+
+  if (text.startsWith('say ')) {
+    try { s.bot.chat(text.slice(4)); } catch (_) {}
+  }
+
+  if (text.startsWith('cmd ')) {
+    try { s.bot.chat('/' + text.slice(4)); } catch (_) {}
   }
 });
 
-// ============================================================
 // SHUTDOWN
-// ============================================================
-
 function shutdown() {
-  if (closing) return;
-
-  closing = true;
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-  }
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearTimeout(reconnectTimer);
 
   if (session) {
     const s = session;
-
-    cleanup(s);
-    session = null;
-
-    try {
-      s.bot.end();
-    } catch (_) {}
+    disconnect(s, 'shutdown', false);
+    try { s.bot.end(); } catch (_) {}
   }
 
-  server.close();
-  process.exit(0);
+  webServer.close();
+  setTimeout(() => process.exit(0), 1000).unref();
 }
 
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 
-process.on('unhandledRejection', err => {
-  history.lastError = String(err);
-
-  announce(
-    `Unhandled rejection: ${err}`
-  );
+process.on('unhandledRejection', e => {
+  history.error = String(e);
+  log(`Unhandled rejection: ${history.error}`);
 });
 
-// ============================================================
-// START AEVORIS
-// ============================================================
-
-announce('AEVORIS — The Silent Wanderer');
-
-announce(
-  'Smart wandering ON | ' +
-  'Chat OFF | ' +
-  `Combat ${ATTACK ? 'ON' : 'OFF'}`
-);
+// START
+log('AEVORIS v3.0 — THE SILENT EXPLORER');
+log(`Expedition distance: ${EXPEDITION} blocks`);
+log(`Waypoint distance: ${WAYPOINT} blocks`);
+log(`Jumping: ${movement['random-jump']?.enabled ? 'ON' : 'OFF'}`);
+log(`Combat: ${ATTACK ? 'ON' : 'OFF'}`);
+log('Automatic chat: OFF');
 
 connect();
